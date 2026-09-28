@@ -3,7 +3,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parent.parent.parent
 load_dotenv(ROOT / ".env")
 
 TOKEN = os.environ.get("DISCORD_BOT_TOKEN")
@@ -12,7 +12,7 @@ MODEL = os.environ.get("MODEL") or "gemma4:31b-cloud"
 MEMORY_SIZE = int(os.environ.get("MEMORY_SIZE") or 20)
 
 PROMPT_FILE = ROOT / "config" / "prompt_instruction"
-DATA_DIR = ROOT / "src" / "data"
+DATA_DIR = ROOT / "src" / "bot_discord" / "data"
 LOG_FILE = DATA_DIR / "bot_log.jsonl"
 MEMORY_FILE = DATA_DIR / "memory.json"
 
