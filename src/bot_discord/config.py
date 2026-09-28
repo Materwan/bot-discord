@@ -30,10 +30,10 @@ NOTES_FILE = DATA_DIR / "user_notes.json"
 def load_user_instructions(user_id: int) -> str:
     """Relu à chaque requête, comme le prompt principal."""
     try:
-        data = "\n".join(json.loads(USERS_FILE.read_text(encoding="utf-8")))
+        data = json.loads(USERS_FILE.read_text(encoding="utf-8"))
     except (FileNotFoundError, json.JSONDecodeError):
         return ""
-    return (data.get(str(user_id)) or {}).get("instructions", "")
+    return "\n".join((data.get(str(user_id)) or {}).get("instructions", []))
 
 
 def load_prompt() -> str:

@@ -44,7 +44,7 @@ class Bot(discord.Client):
     def build_system(self, author: discord.abc.User) -> str:
         parts = [load_prompt()]
         instructions = load_user_instructions(author.id)
-        notes = self.users.get(author.id)
+        notes = self.user_notes.get(author.id)
         if instructions or notes:
             parts.append(
                 f"Informations sur {author.display_name} (la personne qui te parle) :"
