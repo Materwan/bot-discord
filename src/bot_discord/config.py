@@ -25,6 +25,15 @@ ALLOWED_BOT_IDS = {
 
 USERS_FILE = ROOT / "config" / "users.json"
 NOTES_FILE = DATA_DIR / "user_notes.json"
+USER_NAME_ID = DATA_DIR / "user.json"
+
+
+def find_user_id(user_name: str):
+    try:
+        data = json.loads(USER_NAME_ID.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError):
+        return ""
+    return data.get(user_name, f"Not Found User ({user_name})")
 
 
 def load_user_instructions(user_id: int) -> str:
