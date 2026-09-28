@@ -1,58 +1,44 @@
+import asyncio
 import os
-import discord
-from ollama import AsyncClient
+import sys
 
-from dotenv import load_dotenv
-
-load_dotenv()
-
-MODEL = os.environ.get("MODEL", "gemma4:31b-cloud")
-
-intents = discord.Intents.default()
-intents.message_content = True
-bot = discord.Client(intents=intents)
-ai = AsyncClient()  # http://localhost:11434 par défaut
+from .bot import Bot
+from .config import TOKEN
+from .console import Console
 
 
-def decouper(texte, taille=2000):
-    return [texte[i : i + taille] for i in range(0, len(texte), taille)]
+async def main() -> None:
+    if not TOKEN:
+        raise SystemExit("DISCORD_BOT_TOKEN manquant (voir .env.example)")
+
+    bot = Bot()
+
+    async def cmd_token() -> None:
+        print(bot.stats.summary())
+
+    async def cmd_quit() -> None:
+        print("Arrêt du bot...")
+        await bot.close()  # fait sortir bot.start()
+
+    Console({"/token": cmd_token, "/quit": cmd_quit}).start(asyncio.get_running_loop())
+
+    try:
+        async with bot:
+            await bot.start(TOKEN)
+    finally:  # /quit, Ctrl-C ou crash : on passe toujours ici
+        bot.shutdown()
 
 
-@bot.event
-async def on_ready():
-    print(f"Connecté en tant que {bot.user}")
+def run() -> None:
+    try:
+        asyncio.run(main())  # 1er Ctrl-C : annule main() proprement, puis lève KeyboardInterrupt
+    except KeyboardInterrupt:
+        print("\nCtrl-C reçu, bot arrêté.")
+    # Le thread console peut rester bloqué sur input() : on quitte sans attendre
+    # (tout est déjà sauvegardé dans bot.shutdown()).
+    sys.stdout.flush()
+    os._exit(0)
 
 
-@bot.event
-async def on_message(message):
-    if message.author.bot or bot.user not in message.mentions:
-        return
-
-    prompt = (
-        message.content.replace(f"<@{bot.user.id}>", "")
-        .replace(f"<@!{bot.user.id}>", "")
-        .strip()
-    )
-    if not prompt:
-        return
-
-    async with message.channel.typing():
-        resp = await ai.chat(
-            model=MODEL,
-            messages=[
-                {
-                    "role": "system",
-                    "content": "Tu es un bot Discord sympa. Réponds en français, de façon concise.",
-                },
-                {"role": "user", "content": prompt},
-            ],
-        )
-
-    reponse = resp["message"]["content"]
-    morceaux = decouper(reponse)
-    await message.reply(morceaux[0])
-    for morceau in morceaux[1:]:
-        await message.channel.send(morceau)
-
-
-bot.run(os.environ.get("DISCORD_BOT_TOKEN"))
+if __name__ == "__main__":
+    run()
