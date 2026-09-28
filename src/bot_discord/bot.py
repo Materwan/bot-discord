@@ -1,6 +1,8 @@
 import time
 import re
 
+import asyncio
+
 import discord
 from ollama import AsyncClient
 
@@ -24,6 +26,10 @@ REMEMBER_PREFIX = "/remember"
 FORGET_CMD = "/forget"
 MAX_OTHERS = 3  # nombre max d'autres personnes injectées dans le prompt
 MENTION_RE = re.compile(r"(?<![<\w])@(\w[\w'-]*(?: \w[\w'-]*){0,2})")
+
+TYPING_TIMEOUT = 2  # secondes sans événement "typing" => la personne a arrêté
+MAX_TYPING_WAIT = 60  # on ne bloque jamais plus longtemps
+EDIT_GRACE = 2  # secondes sans modification avant de considérer le message comme final
 
 
 def decouper(texte: str, taille: int = 2000) -> list[str]:
@@ -49,6 +55,10 @@ class Bot(discord.Client):
         self.logger = JsonlLogger(LOG_FILE)
         self.stats = SessionStats()
         self.logger.log("start", model=MODEL)
+        self._typing: dict[tuple[int, int], float] = (
+            {}
+        )  # (channel_id, user_id) -> dernier "typing"
+        self._edited: dict[int, float] = {}  # message_id -> dernière modification
 
         self.user_notes = UserNotes(NOTES_FILE)
 
@@ -65,7 +75,6 @@ class Bot(discord.Client):
                     return f"<@{user_id}>" + (f" {reste}" if reste else "")
             return mo.group(0)  # nom inconnu : on laisse le texte tel quel
 
-        print(MENTION_RE.sub(remplacer, texte))
         return MENTION_RE.sub(remplacer, texte)
 
     def describe_user(self, user: discord.abc.User, role: str) -> str:
@@ -126,12 +135,80 @@ class Bot(discord.Client):
         print(f"Connecté en tant que {self.user} (modèle : {MODEL})")
         self.logger.log("ready", user=str(self.user))
 
+    async def on_typing(self, channel, user, when):
+        self._typing[(channel.id, user.id)] = time.monotonic()
+
+    async def wait_until_not_typing(self, channel, user) -> None:
+        key = (channel.id, user.id)
+        deadline = time.monotonic() + MAX_TYPING_WAIT
+        while time.monotonic() < deadline:
+            last = self._typing.get(key)
+            if last is None or time.monotonic() - last > TYPING_TIMEOUT:
+                return
+            await asyncio.sleep(1)
+
+    async def on_message_edit(self, before, after):
+        self._edited[after.id] = time.monotonic()
+        # Cas : le message n'avait pas la mention du bot, il l'a maintenant
+        if self.user in after.mentions and self.user not in before.mentions:
+            await self.on_message(after)
+
+    def extract_prompt(self, message: discord.Message) -> str:
+        return (
+            message.content.replace(f"<@{self.user.id}>", "")
+            .replace(f"<@!{self.user.id}>", "")
+            .strip()
+        )
+
+    async def settle(self, message: discord.Message) -> discord.Message | None:
+        """Attend que l'auteur ait fini d'écrire et de modifier, puis renvoie
+        la version à jour du message (None s'il a été supprimé)."""
+        # Message vide : on laisse un délai pour qu'il soit complété
+        if not self.extract_prompt(message):
+            self._edited.setdefault(message.id, time.monotonic())
+
+        await self.wait_until_not_typing(message.channel, message.author)
+        while True:
+            last = self._edited.get(message.id)
+            if last is None or time.monotonic() - last > EDIT_GRACE:
+                break
+            await asyncio.sleep(1)
+
+        self._edited.pop(message.id, None)
+        try:
+            return await message.channel.fetch_message(message.id)
+        except discord.NotFound:
+            return None
+
     async def on_message(self, message: discord.Message):
+        if self.user not in message.mentions:
+            return
+
+        message = await self.settle(message)
+        if message is None or self.user not in message.mentions:
+            return
+
+        prompt = self.extract_prompt(message)
+        if not prompt:
+            return
+        self._typing.pop((message.channel.id, message.author.id), None)
+        if message.author == self.user:
+            return
+        if self.user not in message.mentions:
+            print(
+                message.author.bot,
+                message.author.id,
+                message.author.name,
+                ALLOWED_BOT_IDS,
+            )
         if message.author == self.user:
             return
         if message.author.bot and message.author.id not in ALLOWED_BOT_IDS:
             return
         if self.user not in message.mentions:
+            return
+        if message.author.id == "1550112364592898048":
+            await message.reply("Je ne répond pas au IA inférieur à moi.")
             return
 
         prompt = (
@@ -203,11 +280,17 @@ class Bot(discord.Client):
             duration_s=round(time.perf_counter() - start, 2),
         )
 
-        morceaux = [self.ajouter_pings(m, message.guild) for m in decouper(reponse)]
-        print(morceaux)
+        morceaux = [self.ajouter_pings(m) for m in decouper(reponse)]
+        await self.wait_until_not_typing(message.channel, message.author)
         await message.reply(morceaux[0])
         for morceau in morceaux[1:]:
             await message.channel.send(morceau)
+
+    async def on_error(self, event_method, *args, **kwargs):
+        import traceback
+
+        self.logger.log("exception", event=event_method, trace=traceback.format_exc())
+        traceback.print_exc()
 
     def shutdown(self) -> None:
         """Sauvegarde finale + résumé de session (appelé quel que soit le mode d'arrêt)."""

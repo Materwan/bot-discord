@@ -22,6 +22,7 @@ DEFAULT_PROMPT = "Tu es un bot Discord sympa. Réponds en français, de façon c
 ALLOWED_BOT_IDS = {
     int(x) for x in (os.environ.get("ALLOWED_BOT_IDS") or "").split(",") if x.strip()
 }
+print(ALLOWED_BOT_IDS)
 
 USERS_FILE = ROOT / "config" / "users.json"
 NOTES_FILE = DATA_DIR / "user_notes.json"
