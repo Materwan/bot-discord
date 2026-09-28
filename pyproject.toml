@@ -3,7 +3,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "discord-ollama-bot"
+name = "bot-discord"
 version = "0.1.0"
 description = "Bot Discord branché sur Ollama, avec mémoire, logs JSONL et commandes console"
 requires-python = ">=3.11"
@@ -14,7 +14,5 @@ dependencies = [
 ]
 
 [project.scripts]
-discord-bot = "src.main:run"
+bot_discord = "bot_discord.main:run"
 
-[tool.setuptools]
-packages = ["src"]

@@ -31,7 +31,9 @@ async def main() -> None:
 
 def run() -> None:
     try:
-        asyncio.run(main())  # 1er Ctrl-C : annule main() proprement, puis lève KeyboardInterrupt
+        asyncio.run(
+            main()
+        )  # 1er Ctrl-C : annule main() proprement, puis lève KeyboardInterrupt
     except KeyboardInterrupt:
         print("\nCtrl-C reçu, bot arrêté.")
     # Le thread console peut rester bloqué sur input() : on quitte sans attendre
