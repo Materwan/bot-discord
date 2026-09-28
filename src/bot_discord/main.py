@@ -5,6 +5,25 @@ import sys
 from .bot import Bot
 from .config import TOKEN
 from .console import Console
+from .stats import SessionStats
+
+
+def build_console(bot: Bot) -> Console:
+    async def cmd_token(args: list[str]) -> None:
+        if not args:
+            print(bot.stats.summary())
+        elif args == ["-a"]:
+            # Lecture du fichier hors de la boucle asyncio (peut être gros)
+            entries = await asyncio.to_thread(lambda: list(bot.logger.read("message")))
+            print(SessionStats.from_log(entries).summary())
+        else:
+            print("Usage : /token (session en cours) | /token -a (total depuis les logs)")
+
+    async def cmd_quit(args: list[str]) -> None:
+        print("Arrêt du bot...")
+        await bot.close()  # fait sortir bot.start()
+
+    return Console({"/token": cmd_token, "/quit": cmd_quit})
 
 
 async def main() -> None:
@@ -12,15 +31,7 @@ async def main() -> None:
         raise SystemExit("DISCORD_BOT_TOKEN manquant (voir .env.example)")
 
     bot = Bot()
-
-    async def cmd_token() -> None:
-        print(bot.stats.summary())
-
-    async def cmd_quit() -> None:
-        print("Arrêt du bot...")
-        await bot.close()  # fait sortir bot.start()
-
-    Console({"/token": cmd_token, "/quit": cmd_quit}).start(asyncio.get_running_loop())
+    build_console(bot).start(asyncio.get_running_loop())
 
     try:
         async with bot:
@@ -31,9 +42,7 @@ async def main() -> None:
 
 def run() -> None:
     try:
-        asyncio.run(
-            main()
-        )  # 1er Ctrl-C : annule main() proprement, puis lève KeyboardInterrupt
+        asyncio.run(main())  # 1er Ctrl-C : annule main() proprement
     except KeyboardInterrupt:
         print("\nCtrl-C reçu, bot arrêté.")
     # Le thread console peut rester bloqué sur input() : on quitte sans attendre

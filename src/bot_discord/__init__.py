@@ -1,12 +1,12 @@
 __all__ = [
-    "main.py",
-    "bot.py",
-    "config.py",
-    "console.py",
-    "logger.py",
-    "memory.py",
-    "stats.py",
-    "users.py",
+    "main",
+    "bot",
+    "config",
+    "console",
+    "logger",
+    "memory",
+    "stats",
+    "users",
 ]
 
 from . import main

@@ -2,7 +2,8 @@ import asyncio
 import threading
 from typing import Awaitable, Callable
 
-Handler = Callable[[], Awaitable[None]]
+# Un handler reçoit la liste des arguments (ex. "/token -a" -> ["-a"])
+Handler = Callable[[list[str]], Awaitable[None]]
 
 
 class Console:
@@ -19,13 +20,13 @@ class Console:
         while True:
             try:
                 line = input()
-            except EOFError:  # stdin fermé (ex. lancé en service) : on arrête juste la console
+            except EOFError:  # stdin fermé (ex. lancé en service)
                 return
-            cmd = line.strip().lower()
-            if not cmd:
+            name, *args = line.strip().lower().split()  or [""]
+            if not name:
                 continue
-            handler = self.commands.get(cmd)
+            handler = self.commands.get(name)
             if handler is None:
                 print(f"Commande inconnue. Disponibles : {', '.join(self.commands)}")
                 continue
-            asyncio.run_coroutine_threadsafe(handler(), loop)
+            asyncio.run_coroutine_threadsafe(handler(args), loop)
