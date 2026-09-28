@@ -8,3 +8,5 @@ __pycache__/
 .venv/
 config/
 tests/
+.claude/
+.pytest_cache/

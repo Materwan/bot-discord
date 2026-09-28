@@ -4,9 +4,9 @@ __all__ = [
     "config",
     "console",
     "logger",
-    "memory",
     "stats",
-    "users",
+    "views",
+    "dashboard",
 ]
 
 from . import main
@@ -14,6 +14,6 @@ from . import bot
 from . import config
 from . import console
 from . import logger
-from . import memory
 from . import stats
-from . import users
+from . import views
+from . import dashboard

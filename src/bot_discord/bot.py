@@ -2,37 +2,36 @@ import asyncio
 import re
 import time
 import traceback
+from pathlib import Path
 
 import discord
-from ollama import AsyncClient
 
 from .config import (
     ALLOWED_BOT_IDS,
     LOG_FILE,
     MEMORY_FILE,
-    MEMORY_SIZE,
-    MODEL,
     NOTES_FILE,
-    find_user_id,
-    load_prompt,
-    load_user_instructions,
+    UPLOADS_DIR,
+    ALLOWED_EXTENSIONS,
+    BOT_OWNER_ID,
+    MODEL,
 )
 from .logger import JsonlLogger
-from .memory import Memory
 from .stats import SessionStats
-from .users import UserNotes
+from .console import Console
+from .dashboard import TerminalDashboard
+from .views import ToolAuthView
+
+from core import Memory, UserNotes, BotState, RequestTracker
+from agent import create_agent, build_system_prompt, find_related_users, extract_prompt, resolve_mentions, ajouter_pings
 
 REMEMBER_PREFIX = "/remember"
 FORGET_CMD = "/forget"
 MAX_NOTE_LENGTH = 300
-MAX_OTHERS = 3  # nombre max d'autres personnes injectées dans le prompt
 MAX_MESSAGE_LENGTH = 2000  # limite Discord
-MIN_NAME_LENGTH = 3  # évite les faux positifs sur les pseudos très courts
 
 INFERIOR_BOT_ID = 1550112364592898048
 INFERIOR_BOT_REPLY = "Je ne répond pas au IA inférieur à moi."
-
-MENTION_RE = re.compile(r"(?<![<\w])@(\w[\w'-]*(?: \w[\w'-]*){0,2})")
 
 TYPING_TIMEOUT = 2  # secondes sans événement "typing" => la personne a arrêté
 MAX_TYPING_WAIT = 60  # on ne bloque jamais plus longtemps
@@ -56,105 +55,75 @@ class Bot(discord.Client):
         )
         super().__init__(intents=intents, allowed_mentions=allowed)
 
-        self.ai = AsyncClient()  # http://localhost:11434 par défaut
-        self.memory = Memory(MEMORY_FILE, MEMORY_SIZE)
+        # Création automatique du dossier uploads pour éviter les FileNotFoundError
+        UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+
+        # Core services
+        self.memory = Memory(MEMORY_FILE)
         self.user_notes = UserNotes(NOTES_FILE)
         self.logger = JsonlLogger(LOG_FILE)
         self.stats = SessionStats()
         self.logger.log("start", model=MODEL)
+
+        # Dashboard et Tracker
+        self.tracker = RequestTracker()
+        self.dashboard = TerminalDashboard(self.tracker)
+
+        # État et Autorisation
+        self.state = BotState()
+
+        # Initialisation de l'Agent Agno
+        self.agent = create_agent(
+            bot=self,
+            memory=self.memory,
+            user_notes=self.user_notes,
+            state=self.state,
+            tracker=self.tracker,
+        )
 
         # (channel_id, user_id) -> dernier "typing" ; message_id -> dernière modification
         self._typing: dict[tuple[int, int], float] = {}
         self._edited: dict[int, float] = {}
 
     # ------------------------------------------------------------------
-    # Construction du prompt
+    # Construction du prompt (délégué à agent.prompts)
     # ------------------------------------------------------------------
-    def describe_user(self, user: discord.abc.User, role: str) -> str:
-        instructions = load_user_instructions(user.id)
-        notes = self.user_notes.get(user.id)
-        if not instructions and not notes:
-            return ""
-        lines = [f"Informations sur {user.display_name} ({role}) :"]
-        if instructions:
-            lines.append(instructions)
-        if notes:
-            lines.append(
-                "Ce qu'on t'a demandé de retenir :\n"
-                + "\n".join(f"- {n}" for n in notes)
-            )
-        return "\n".join(lines)
+    def build_prompt_context(self, message: discord.Message, prompt: str, uploaded_files: list[str] = None) -> str:
+        """Construit le contexte complet pour l'agent."""
+        channel_id = message.channel.id
+        author = message.author
 
-    def has_info(self, user: discord.abc.User) -> bool:
-        return bool(load_user_instructions(user.id) or self.user_notes.get(user.id))
+        # Mémoires du salon
+        memories = self.memory.get(channel_id)
 
-    def find_related_users(self, message: discord.Message, text: str) -> list:
-        """Personnes mentionnées ou citées par leur nom, autres que l'auteur et le bot."""
-        found: dict[int, discord.abc.User] = {}
+        # Utilisateurs liés
+        others = find_related_users(message, prompt, self.user, self.user_notes)
 
-        # 1. Mentions explicites (@Paul)
-        for u in message.mentions:
-            if u not in (self.user, message.author) and not u.bot:
-                found[u.id] = u
+        # Construction du prompt système via agent.prompts
+        system_prompt = build_system_prompt(author, others, memories, self.user_notes)
 
-        # 2. Noms écrits sans mention (« que penses-tu de Paul ? »)
-        if message.guild:
-            for m in message.guild.members:
-                if m.bot or m == message.author or m.id in found:
-                    continue
-                name = m.display_name
-                if len(name) < MIN_NAME_LENGTH:
-                    continue
-                if re.search(rf"(?<!\w){re.escape(name)}(?!\w)", text, re.IGNORECASE):
-                    found[m.id] = m
+        # Fichiers uploadés
+        if uploaded_files:
+            files_list = ", ".join(uploaded_files)
+            system_prompt += f"\n\n[Système : L'utilisateur a envoyé les fichiers suivants : {files_list}. Tu peux utiliser l'outil `read_file` pour lire leur contenu.]"
 
-        # On ne garde que ceux pour qui on a quelque chose à dire, puis on limite
-        return [u for u in found.values() if self.has_info(u)][:MAX_OTHERS]
+        user_content = f"{author.display_name} : {prompt}"
+        full_prompt = f"CONTEXTE ACTUEL :\n{system_prompt}\n\nMESSAGE :\n{user_content}"
 
-    def build_system(self, author: discord.abc.User, others=()) -> str:
-        parts = [
-            load_prompt(),
-            self.describe_user(author, "la personne qui te parle"),
-            *(
-                self.describe_user(u, "une autre personne, qui ne te parle pas")
-                for u in others
-            ),
-        ]
-        return "\n\n".join(p for p in parts if p)
+        return full_prompt
 
     # ------------------------------------------------------------------
-    # Texte : extraction et pings
+    # Texte : extraction et pions
     # ------------------------------------------------------------------
     def extract_prompt(self, message: discord.Message) -> str:
-        return (
-            message.content.replace(f"<@{self.user.id}>", "")
-            .replace(f"<@!{self.user.id}>", "")
-            .strip()
-        )
+        return extract_prompt(message, self.user)
 
     def resolve_mentions(self, message: discord.Message, prompt: str) -> str:
-        """Remplace les mentions <@id> des autres personnes par leur nom."""
-        for u in message.mentions:
-            if u != self.user:
-                prompt = prompt.replace(f"<@{u.id}>", u.display_name).replace(
-                    f"<@!{u.id}>", u.display_name
-                )
-        return prompt
+        return resolve_mentions(message, prompt, self.user)
 
     def ajouter_pings(self, texte: str) -> str:
-        """Transforme « @Paul » en <@id> grâce à find_user_id."""
-
-        def remplacer(mo: re.Match) -> str:
-            mots = mo.group(1).split(" ")
-            # On essaie d'abord le nom le plus long, puis on raccourcit
-            for n in range(len(mots), 0, -1):
-                user_id = find_user_id(" ".join(mots[:n]))
-                if user_id and user_id != self.user.id:
-                    reste = " ".join(mots[n:])
-                    return f"<@{user_id}>" + (f" {reste}" if reste else "")
-            return mo.group(0)  # nom inconnu : on laisse le texte tel quel
-
-        return MENTION_RE.sub(remplacer, texte)
+        from agent import find_user_id
+        return ajouter_pings(texte, self.user, find_user_id)
 
     # ------------------------------------------------------------------
     # Attente que l'auteur ait fini d'écrire / modifier
@@ -195,6 +164,9 @@ class Bot(discord.Client):
         print(f"Connecté en tant que {self.user} (modèle : {MODEL})")
         self.logger.log("ready", user=str(self.user))
 
+        # Lancement du dashboard dans une tâche de fond
+        self.loop.create_task(self.dashboard.run())
+
     async def on_typing(self, channel, user, when):
         self._typing[(channel.id, user.id)] = time.monotonic()
 
@@ -217,6 +189,17 @@ class Bot(discord.Client):
         if message is None or self.user not in message.mentions:
             return
 
+        # Gestion des pièces jointes
+        uploaded_files = []
+        if message.attachments:
+            for attachment in message.attachments:
+                ext = Path(attachment.filename).suffix.lower()
+                if ext in ALLOWED_EXTENSIONS:
+                    # On utilise l'ID du message pour éviter les collisions de noms
+                    safe_filename = f"{message.id}_{attachment.filename}"
+                    await attachment.save(UPLOADS_DIR / safe_filename)
+                    uploaded_files.append(safe_filename)
+
         prompt = self.extract_prompt(message)
         if not prompt:
             return
@@ -224,7 +207,7 @@ class Bot(discord.Client):
 
         if await self.handle_command(message, prompt):
             return
-        await self.answer(message, self.resolve_mentions(message, prompt))
+        await self.answer(message, self.resolve_mentions(message, prompt), uploaded_files)
 
     # ------------------------------------------------------------------
     # Commandes /remember et /forget
@@ -232,6 +215,23 @@ class Bot(discord.Client):
     async def handle_command(self, message: discord.Message, prompt: str) -> bool:
         """Exécute une commande utilisateur. Renvoie True si le message en était une."""
         low = prompt.lower()
+
+        # Commande /set_auth (Admin seulement)
+        if low.startswith("/set_auth"):
+            if message.author.id != BOT_OWNER_ID:
+                return False  # On ignore si ce n'est pas le propriétaire
+
+            parts = low.split()
+            if len(parts) == 2 and parts[1].isdigit():
+                level = int(parts[1])
+                if 0 <= level <= 2:
+                    self.state.set_auth_level(level)
+                    await message.reply(f"Le niveau d'autorisation automatique a été fixé à {level}.")
+                    return True
+
+            await message.reply("Usage : `/set_auth <0|1|2>`")
+            return True
+
         if low.startswith(REMEMBER_PREFIX):
             note = prompt[len(REMEMBER_PREFIX) :].strip()[:MAX_NOTE_LENGTH]
             self.user_notes.add(message.author.id, note)
@@ -244,34 +244,44 @@ class Bot(discord.Client):
         return False
 
     # ------------------------------------------------------------------
-    # Génération de la réponse
+    # Génération de la réponse via l'agent
     # ------------------------------------------------------------------
-    async def answer(self, message: discord.Message, prompt: str) -> None:
+    async def answer(self, message: discord.Message, prompt: str, uploaded_files: list[str] = None) -> None:
         channel_id = message.channel.id
-        user_content = f"{message.author.display_name} : {prompt}"
-        others = self.find_related_users(message, prompt)
-        messages = [
-            {"role": "system", "content": self.build_system(message.author, others)},
-            *self.memory.get(channel_id),
-            {"role": "user", "content": user_content},
-        ]
+
+        # Lancement du tracking de la requête
+        self.tracker.start_request(message.id, message.author.display_name, prompt)
+
+        # Construction du prompt complet
+        full_prompt = self.build_prompt_context(message, prompt, uploaded_files)
 
         start = time.perf_counter()
         try:
             async with message.channel.typing():
-                resp = await self.ai.chat(model=MODEL, messages=messages)
+                # Phase : Processing
+                self.tracker.update_phase(message.id, "Processing")
+
+                # Utilisation de arun() pour l'exécution asynchrone de l'Agent Agno
+                resp = await self.agent.arun(full_prompt)
+
+                # Phase : Answering (juste avant l'envoi)
+                self.tracker.update_phase(message.id, "Answering")
+                reponse = resp.content or "..."
         except Exception as e:
-            print(f"Erreur Ollama : {e}")
+            print(f"Erreur Agno : {e}")
             self.logger.log("error", channel_id=channel_id, error=repr(e))
             await message.reply("Désolé, je n'ai pas réussi à générer une réponse.")
             return
+        finally:
+            # Suppression de la requête du dashboard une fois terminée
+            self.tracker.complete_request(message.id)
 
-        reponse = resp.message.content or "..."
-        prompt_tokens = resp.prompt_eval_count or 0
-        completion_tokens = resp.eval_count or 0
-
+        # On ne peut pas facilement récupérer les tokens exacts depuis arun()
+        # sans accéder aux détails du modèle, on met 0 par défaut pour les stats
+        prompt_tokens = 0
+        completion_tokens = 0
         self.stats.add(prompt_tokens, completion_tokens)
-        self.memory.add_exchange(channel_id, user_content, reponse)
+
         self.logger.log(
             "message",
             channel_id=channel_id,
@@ -299,7 +309,7 @@ class Bot(discord.Client):
     # Erreurs et arrêt
     # ------------------------------------------------------------------
     async def on_error(self, event_method, *args, **kwargs):
-        self.logger.log("exception", event=event_method, trace=traceback.format_exc())
+        self.logger.log("exception", event_method=event_method, trace=traceback.format_exc())
         traceback.print_exc()
 
     def shutdown(self) -> None:

@@ -3,12 +3,11 @@ from pathlib import Path
 
 
 class Memory:
-    """Historique de conversation par salon, persisté sur disque."""
+    """Mémoires persistantes par salon, distillées par le modèle."""
 
-    def __init__(self, path: Path, max_messages: int = 20):
+    def __init__(self, path: Path):
         self.path = path
-        self.max_messages = max(2, max_messages)
-        self._data: dict[str, list[dict]] = {}
+        self._data: dict[str, list[str]] = {}
         self._load()
 
     def _load(self) -> None:
@@ -23,12 +22,11 @@ class Memory:
         tmp.write_text(json.dumps(self._data, ensure_ascii=False), encoding="utf-8")
         tmp.replace(self.path)  # écriture atomique
 
-    def get(self, channel_id: int) -> list[dict]:
-        return list(self._data.get(str(channel_id), []))
+    def get(self, channel_id: int) -> list[str]:
+        return self._data.get(str(channel_id), [])
 
-    def add_exchange(self, channel_id: int, user_content: str, reply: str) -> None:
+    def add_memory(self, channel_id: int, content: str) -> None:
         history = self._data.setdefault(str(channel_id), [])
-        history.append({"role": "user", "content": user_content})
-        history.append({"role": "assistant", "content": reply})
-        del history[: -self.max_messages]
-        self.save()
+        if content not in history:
+            history.append(content)
+            self.save()
