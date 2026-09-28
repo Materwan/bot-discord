@@ -1,4 +1,5 @@
 import os
+import json
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -17,6 +18,22 @@ LOG_FILE = DATA_DIR / "bot_log.jsonl"
 MEMORY_FILE = DATA_DIR / "memory.json"
 
 DEFAULT_PROMPT = "Tu es un bot Discord sympa. Réponds en français, de façon concise."
+
+ALLOWED_BOT_IDS = {
+    int(x) for x in (os.environ.get("ALLOWED_BOT_IDS") or "").split(",") if x.strip()
+}
+
+USERS_FILE = ROOT / "config" / "users.json"
+NOTES_FILE = DATA_DIR / "user_notes.json"
+
+
+def load_user_instructions(user_id: int) -> str:
+    """Relu à chaque requête, comme le prompt principal."""
+    try:
+        data = "\n".join(json.loads(USERS_FILE.read_text(encoding="utf-8")))
+    except (FileNotFoundError, json.JSONDecodeError):
+        return ""
+    return (data.get(str(user_id)) or {}).get("instructions", "")
 
 
 def load_prompt() -> str:

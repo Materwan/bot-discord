@@ -3,10 +3,23 @@ import time
 import discord
 from ollama import AsyncClient
 
-from .config import LOG_FILE, MEMORY_FILE, MEMORY_SIZE, MODEL, load_prompt
+from .config import (
+    LOG_FILE,
+    MEMORY_FILE,
+    MEMORY_SIZE,
+    MODEL,
+    NOTES_FILE,
+    ALLOWED_BOT_IDS,
+    load_prompt,
+    load_user_instructions,
+)
 from .logger import JsonlLogger
 from .memory import Memory
 from .stats import SessionStats
+from .users import UserNotes
+
+REMEMBER_PREFIX = "retiens que "
+FORGET_CMD = "oublie tout"
 
 
 def decouper(texte: str, taille: int = 2000) -> list[str]:
@@ -15,6 +28,7 @@ def decouper(texte: str, taille: int = 2000) -> list[str]:
 
 class Bot(discord.Client):
     def __init__(self):
+
         intents = discord.Intents.default()
         intents.message_content = True
         super().__init__(intents=intents)
@@ -25,12 +39,35 @@ class Bot(discord.Client):
         self.stats = SessionStats()
         self.logger.log("start", model=MODEL)
 
+        self.user_notes = UserNotes(NOTES_FILE)
+
+    def build_system(self, author: discord.abc.User) -> str:
+        parts = [load_prompt()]
+        instructions = load_user_instructions(author.id)
+        notes = self.users.get(author.id)
+        if instructions or notes:
+            parts.append(
+                f"Informations sur {author.display_name} (la personne qui te parle) :"
+            )
+        if instructions:
+            parts.append(instructions)
+        if notes:
+            parts.append(
+                "Ce qu'elle t'a demandé de retenir :\n"
+                + "\n".join(f"- {n}" for n in notes)
+            )
+        return "\n\n".join(parts)
+
     async def on_ready(self):
         print(f"Connecté en tant que {self.user} (modèle : {MODEL})")
         self.logger.log("ready", user=str(self.user))
 
     async def on_message(self, message: discord.Message):
-        if message.author.bot or self.user not in message.mentions:
+        if message.author == self.user:
+            return
+        if message.author.bot and message.author.id not in ALLOWED_BOT_IDS:
+            return
+        if self.user not in message.mentions:
             return
 
         prompt = (
@@ -41,10 +78,22 @@ class Bot(discord.Client):
         if not prompt:
             return
 
+        low = prompt.lower()
+        if low.startswith(REMEMBER_PREFIX):
+            self.user_notes.add(
+                message.author.id, prompt[len(REMEMBER_PREFIX) :].strip()[:300]
+            )
+            await message.reply("C'est noté !")
+            return
+        if low == FORGET_CMD:
+            self.user_notes.clear(message.author.id)
+            await message.reply("J'ai tout oublié te concernant.")
+            return
+
         channel_id = message.channel.id
         user_content = f"{message.author.display_name} : {prompt}"
         messages = [
-            {"role": "system", "content": load_prompt()},
+            {"role": "system", "content": self.build_system(message.author)},
             *self.memory.get(channel_id),
             {"role": "user", "content": user_content},
         ]
