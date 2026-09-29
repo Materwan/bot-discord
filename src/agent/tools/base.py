@@ -98,7 +98,7 @@ class AuthorizationWrapper:
 
         try:
             owner = await self.bot.fetch_user(BOT_OWNER_ID)
-            view = ToolAuthView(self.bot, tool_name)
+            view = ToolAuthView(self.bot, tool_name, wrapper=self)
             await owner.send(
                 f"⚠️ **Demande d'autorisation**\n\n"
                 f"L'agent souhaite utiliser l'outil `{tool_name}` (Niveau {required_level}), "

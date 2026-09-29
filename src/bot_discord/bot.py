@@ -10,7 +10,11 @@ from .config import (
     ALLOWED_BOT_IDS,
     LOG_FILE,
     MEMORY_FILE,
+    MEMORY_SIZE,
     NOTES_FILE,
+    LEGACY_NOTES_FILE,
+    HISTORY_FILE,
+    STATE_FILE,
     UPLOADS_DIR,
     ALLOWED_EXTENSIONS,
     BOT_OWNER_ID,
@@ -30,6 +34,7 @@ from core import (
     BotState,
     RequestTracker,
     Whitelist,
+    ChannelHistory,
     TONE_DELTAS,
     DEFAULT_TONE,
     detect_rudeness,
@@ -81,8 +86,9 @@ class Bot(discord.Client):
 
         # Core services
         self.memory = Memory(MEMORY_FILE)
-        self.user_notes = UserNotes(NOTES_FILE)
+        self.user_notes = UserNotes(NOTES_FILE, legacy_path=LEGACY_NOTES_FILE)
         self.whitelist = Whitelist(WHITELIST_FILE)
+        self.history = ChannelHistory(HISTORY_FILE, max_entries=MEMORY_SIZE)
         self.logger = JsonlLogger(LOG_FILE)
         self.stats = SessionStats()
         self.logger.log("start", model=MODEL)
@@ -92,7 +98,7 @@ class Bot(discord.Client):
         self.dashboard = TerminalDashboard(self.tracker)
 
         # État et Autorisation
-        self.state = BotState()
+        self.state = BotState(STATE_FILE)
 
         # Initialisation de l'Agent Agno
         self.agent = create_agent(
@@ -124,8 +130,13 @@ class Bot(discord.Client):
         # Utilisateurs liés
         others = find_related_users(message, prompt, self.user, self.user_notes)
 
+        # Historique de conversation (MEMORY_SIZE derniers échanges)
+        history = self.history.get(channel_id)
+
         # Construction du prompt système via agent.prompts
-        system_prompt = build_system_prompt(author, others, memories, self.user_notes)
+        system_prompt = build_system_prompt(
+            author, others, memories, self.user_notes, text=prompt, history=history
+        )
 
         # Fichiers uploadés
         if uploaded_files:
@@ -444,6 +455,9 @@ class Bot(discord.Client):
 
         await self.send_reply(message, reponse)
 
+        # Historique de conversation du salon (MEMORY_SIZE derniers échanges)
+        self.history.add(channel_id, message.author.display_name, prompt, reponse)
+
     async def send_reply(self, message: discord.Message, reponse: str) -> None:
         morceaux = [self.ajouter_pings(m) for m in decouper(reponse)]
         await self.wait_until_not_typing(message.channel, message.author)
@@ -461,6 +475,7 @@ class Bot(discord.Client):
     def shutdown(self) -> None:
         """Sauvegarde finale + résumé de session (appelé quel que soit le mode d'arrêt)."""
         self.memory.save()
+        self.user_notes.close()
         self.logger.log(
             "stop",
             requests=self.stats.requests,

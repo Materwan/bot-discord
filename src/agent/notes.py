@@ -9,7 +9,7 @@ réponse) pour :
 import json
 import re
 
-from core import UserNotes, TONE_DELTAS, DEFAULT_TONE, VALID_TONES
+from core import UserNotes, TONE_DELTAS, DEFAULT_TONE, VALID_TONES, looks_like_instruction
 
 MAX_FACTS_PER_USER = 3
 MAX_FACT_LENGTH = 200
@@ -104,12 +104,17 @@ def parse_insights(raw: str, allowed_ids: set[int]) -> dict[int, dict]:
             if isinstance(raw_facts, list):
                 for fact in raw_facts[:MAX_FACTS_PER_USER]:
                     fact = str(fact).strip()[:MAX_FACT_LENGTH]
-                    if fact and fact not in facts:
-                        facts.append(fact)
+                    # Anti-empoisonnement : un « fait » qui est en réalité un ordre
+                    if not fact or fact in facts or looks_like_instruction(fact):
+                        continue
+                    facts.append(fact)
             tone = str(value.get("tone") or DEFAULT_TONE).strip().lower()
         elif isinstance(value, list):  # format raccourci : {"123": ["fait"]}
-            facts = [str(f).strip()[:MAX_FACT_LENGTH] for f in value[:MAX_FACTS_PER_USER]]
-            facts = [f for f in facts if f]
+            facts = [
+                str(f).strip()[:MAX_FACT_LENGTH]
+                for f in value[:MAX_FACTS_PER_USER]
+                if str(f).strip() and not looks_like_instruction(str(f).strip())
+            ]
 
         if tone not in VALID_TONES:
             tone = DEFAULT_TONE

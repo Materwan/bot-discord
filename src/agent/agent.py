@@ -40,8 +40,11 @@ def create_agent(
     # Outils Agno avec wrapper autorisation + tracking
     agno_tools = []
     for tool in tool_registry.get_all():
+        # tool.to_agno_tool() porte le vrai nom de l'outil (et sa description) :
+        # sans ça, tous les outils s'appellent "execute", Agno les confond et
+        # get_level("execute") renvoie FREE -> aucune autorisation ne s'applique.
         wrapped = create_authorization_wrapper(
-            tool.execute,
+            tool.to_agno_tool(),
             auth_wrapper,
             tracker
         )

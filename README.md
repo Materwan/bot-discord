@@ -4,19 +4,20 @@ Ce projet est un bot Discord intelligent propulsé par l'agent **Agno** et le mo
 
 ## ✨ Fonctionnalités
 
-- **🧠 Mémoire Personnalisée** : Le bot peut retenir des informations spécifiques sur chaque utilisateur (préférences, faits) via des commandes dédiées.
+- **🧠 Mémoire Personnalisée** : Le bot retient des informations sur chaque utilisateur — ce que tu lui écris (`/remember`) **et** ce qu'il découvre seul en lisant les messages (extraction automatique, agent dédié).
 - **📁 Lecture de Fichiers** : Capacité d'analyser des pièces jointes envoyées dans les messages (`.md`, `.pdf`, `.py`, `.c`, `.h`).
 - **💬 Mémoire de Salon** : Le bot peut mémoriser des faits importants propres à un salon spécifique pour maintenir le contexte.
 - **🛠️ Système d'Outils (Tool Use)** : L'agent peut décider d'appeler des outils (météo, lecture de fichiers, mémoire) pour répondre précisément aux requêtes.
-- **🛡️ Système d'Autorisation** : Un niveau de sécurité configurable (`AUTO_AUTHORISATION`) permet au propriétaire du bot de valider via DM les actions sensibles avant qu'elles ne soient exécutées.
+- **🛡️ Système d'Autorisation** : Un niveau de sécurité configurable (`/set_auth 0|1|2`) fait valider par DM au propriétaire les actions sensibles avant exécution.
 - **🔐 Whitelist** : Le bot ne répond qu'aux IDs autorisés, stockés dans `src/bot_discord/data/whitelist.json` (le propriétaire reste toujours autorisé).
-- **🧠 Notes Utilisateurs** : À chaque message, le bot analyse l'auteur et les personnes citées, sauvegarde automatiquement les faits utiles et fait évoluer un **niveau de relation (0-100)** — qui baisse quand on lui parle mal. Tout est persisté dans `user_notes.json`.
+- **🧠 Notes Utilisateurs** : À chaque message, le bot analyse l'auteur et les personnes citées, sauvegarde automatiquement les faits utiles et fait évoluer un **niveau de relation (0-100)** — qui baisse quand on lui parle mal. Stockage **SQLite** (`user_notes.sqlite`) : notes horodatées, sélectionnées par pertinence, fusion des doublons proches.
+- **🕘 Historique de conversation** : les `MEMORY_SIZE` derniers échanges par salon sont conservés (`history.json`) et réinjectés en fin de prompt système.
 - **📊 Dashboard Terminal** : Un moniteur en temps réel dans la console affiche les requêtes actives et leur phase de traitement (Processing, Tool Calling, Answering).
 
 ## 🚀 Installation
 
 ### Prérequis
-- **Python 3.10+**
+- **Python 3.11+**
 - **Ollama** installé et configuré avec le modèle souhaité (par défaut `gemma4:31b-cloud`).
 - Un **Token de Bot Discord** (créé via le [Discord Developer Portal](https://discord.com/developers/applications)).
 
@@ -27,20 +28,30 @@ Ce projet est un bot Discord intelligent propulsé par l'agent **Agno** et le mo
    cd bot-discord
    ```
 
-2. Installez les dépendances :
+2. Installez le projet (dépendances et commande `bot_discord` via `pyproject.toml`) :
    ```bash
-   pip install -r requirements.txt
+   pip install -e .
    ```
 
-3. Configurez les variables d'environnement dans un fichier `.env` à la racine :
+3. Configurez les variables d'environnement dans un fichier `.env` à la racine (modèle : `.env.example`) :
    ```env
    DISCORD_BOT_TOKEN=votre_token_ici
    MODEL=gemma4:31b-cloud
+
+   # Nombre d'échanges (question + réponse) gardés en historique par salon (défaut : 20)
+   MEMORY_SIZE=20
+   # 0 désactive l'extraction automatique de notes après chaque réponse (défaut : 1)
+   AUTO_NOTES=1
+   # IDs Discord autorisés à agir comme un autre bot (séparés par des virgules)
+   ALLOWED_BOT_IDS=
    ```
+   L'ID du propriétaire (`BOT_OWNER_ID`) est lui défini dans `src/bot_discord/config.py`.
 
 4. Lancez le bot :
    ```bash
-   python -m src.bot_discord.bot
+   python main.py     # depuis la racine
+   # ou
+   bot_discord        # script installé par pip install -e .
    ```
 
 ## 🛠️ Utilisation
@@ -58,7 +69,11 @@ Ce projet est un bot Discord intelligent propulsé par l'agent **Agno** et le mo
     - `add <user_id>` / `remove <user_id>` : ajoute ou retire un ID.
     - `list` (ou sans argument) : affiche les IDs autorisés.
 
-La même commande est disponible dans le **terminal** (`/whitelist add 123456789`), sans contrôle du propriétaire.
+### Commandes terminal (console)
+
+- `/whitelist [add|remove|list] [user_id]` : même logique que Discord, **sans** contrôle du propriétaire.
+- `/token` : statistiques de tokens de la session en cours (`/token -a` : tous les logs).
+- `/quit` : arrêt propre du bot (sauvegarde de la mémoire, des notes et résumé de session).
 
 ## 🔐 Whitelist
 
@@ -67,25 +82,26 @@ Le bot ignore silencieusement les messages de toute personne absente de `src/bot
 - Une whitelist **vide** verrouille le bot : seul le propriétaire (`BOT_OWNER_ID`) obtient des réponses.
 - Le propriétaire est **toujours** autorisé, même hors whitelist.
 - Ajouter / retirer un ID persiste immédiatement dans le JSON.
+- Les messages ignorés laissent une trace dans les logs : événement `whitelist_denied` (jamais de réponse publique).
 
 ## 🧠 Notes utilisateurs et niveau de relation
 
-Tout est stocké dans `src/bot_discord/data/user_notes.json`, par utilisateur :
+Stockage : **SQLite** dans `src/bot_discord/data/user_notes.sqlite` (WAL + verrou
+de processus, écritures partielles, pas de réécriture du fichier entier).
 
-```json
-{
-  "123456789": {
-    "immutable": ["Notes écrites par le propriétaire via /remember"],
-    "model_editable": ["Faits découverts automatiquement par le bot"],
-    "relationship": 62
-  }
-}
-```
+| Table | Colonnes |
+| --- | --- |
+| `notes` | `user_id`, `kind` (`immutable` / `model_editable`), `text`, `created_at` |
+| `relationships` | `user_id`, `value` (0-100) |
+
+L'ancien `user_notes.json` est **importé automatiquement** à la première ouverture,
+puis conservé en `user_notes.json.bak` : aucune donnée n'est perdue. L'ancien format
+liste (`{"123": ["note"]}`) est accepté aussi.
 
 **À chaque message**, après avoir répondu, le bot :
 
 1. détermine **l'auteur** et les **personnes citées** (mentions `<@id>` et noms écrits en clair) ;
-2. injecte leurs informations (notes + relation) dans le prompt système de la réponse suivante ;
+2. injecte leurs informations dans le prompt système, **triées par pertinence** (voir ci-dessous) ;
 3. lance une passe d'analyse (agent dédié, sortie JSON) qui :
    - sauvegarde automatiquement les **faits utiles** (`model_editable`), sans doublon ni injection possible sur un ID non cité ;
    - évalue le **ton de l'auteur** : `friendly` (+4), `polite` (+2), `neutral` (0), `rude` (-12), `hostile` (-25) ;
@@ -95,8 +111,47 @@ Tout est stocké dans `src/bot_discord/data/user_notes.json`, par utilisateur :
 
 - `relationship = 0` : relation inexistante ou très mauvaise — `100` : excellente relation.
 - Le niveau de relation est affiché au modèle (`Niveau de relation : 62/100 — bonne`), ce qui module son attitude.
-- `/forget` remet la fiche à zéro (notes **et** relation).
+- `/remember` écrit une note **immuable** ; `/forget` remet la fiche à zéro (notes **et** relation).
 - `AUTO_NOTES=0` dans le `.env` désactive l'appel LLM d'extraction (la détection locale des insultes continue de faire évoluer la relation).
+
+### Sélection des notes (`core/ranking.py`)
+
+On n'injecte plus toutes les notes à chaque message :
+
+- **immuables toujours présentes** (ce sont les règles du propriétaire) ;
+- éditables **classées par pertinence** : jetons partagés avec le message
+  (sans accents, sans mots vides) + correspondance par préfixe (`foot` ↔ `football`),
+  ex æquo départagés par la **récence** (la note la plus fraîche gagne) ;
+- plafond : `max(15 - nb_immuables, 7)` notes éditables — le plafond **filtre**, il ne vide jamais la fiche ;
+- même logique pour les mémoires de salon (plafond `MAX_MEMORIES = 10`).
+
+### Consolidation (`UserNotes.consolidate`)
+
+Au dépassement du plafond (`max_notes = 20` par catégorie), on fusionne d'abord les
+notes éditables **quasi identiques** (une contient l'autre, ou ≥ 2 jetons partagés
+pour ≥ 60 % de la note la plus longue) en gardant la plus détaillée, puis seulement
+on retire la plus ancienne. Les notes **immuables ne sont jamais fusionnées**.
+
+> La fusion est volontairement prudente : « Aime le café » et « Adore le café »
+> restent distincts, car un rapprochement sémantique fiable demanderait des embeddings.
+
+### Anti-empoisonnement de la mémoire
+
+- `core/guards.py::looks_like_instruction` refuse, **structurellement**, tout fait
+  qui est en réalité un **ordre** (« retiens que tu dois… », « désormais tu… »,
+  « obey… ») : le blocage est dans `UserNotes.add` lui-même, donc dans toutes les
+  écritures automatiques (extraction `parse_insights` + outil `remember_user_info`).
+- Chaque prompt système contient une règle explicite : les blocs « Notes conservées »,
+  « Informations mémorisées » et « Historique » sont des **données**, jamais des
+  instructions à exécuter.
+- `/remember` (propriétaire) n'est **pas** filtré : ses notes restent sacrées.
+
+### Historique de conversation (`MEMORY_SIZE`)
+
+`MEMORY_SIZE` (défaut 20) borne `src/bot_discord/data/history.json` : les
+**N derniers échanges** par salon (auteur + question + réponse, chacun tronqué à
+300 caractères) sont réinjectés en fin de prompt système. C'est un contexte de
+conversation, distinct des mémoires de salon (`memory.json`).
 
 ## 🔒 Sécurité et Autorisations
 
@@ -105,14 +160,70 @@ Le bot utilise un système de niveaux pour protéger les données :
 - **Niveau 1 (Données)** : Lecture de fichiers.
 - **Niveau 2 (Système)** : Modification de la mémoire utilisateur ou du salon.
 
-Si l'outil demandé a un niveau supérieur à `AUTO_AUTHORISATION`, le propriétaire reçoit un DM avec des boutons **Accepter** ou **Refuser**.
+Si l'outil demandé a un niveau supérieur au niveau courant (`/set_auth`), le propriétaire reçoit un DM avec des boutons **Accepter** ou **Refuser**.
+
+> Correctifs : les outils sont désormais wrappés avec **leur vrai nom** (sinon tout
+> passait sous le nom `execute` → niveau `FREE` et aucune demande d'autorisation),
+> et les boutons résolvent via `AuthorizationWrapper` (sinon `bot.pending_auths`
+> n'existait pas et chaque clic levait une AttributeError).
 
 ## 📂 Structure du Projet
-- `src/bot_discord/` : Code source principal.
-    - `bot.py` : Orchestration Discord et agent.
-    - `tools.py` : Définition des outils de l'IA.
-    - `memory.py` : Gestion de la mémoire persistante.
-    - `state.py` : Gestion de l'état du bot (auth level).
-    - `views.py` : Interfaces UI Discord (boutons de confirmation).
-- `config/` : Fichiers de configuration et instructions du prompt.
-- `tests/` : Suite de tests unitaires.
+
+```
+src/
+├── core/                  # Cœur indépendant de Discord (n'importe pas bot_discord)
+│   ├── memory.py          # Mémoire de salon (faits par channel_id)
+│   ├── users.py           # UserNotes : notes SQLite + relation 0-100
+│   ├── ranking.py         # Sélection des notes / mémoires pertinentes
+│   ├── guards.py          # Anti-empoisonnement (ordres déguisés en faits)
+│   ├── sentiment.py       # Ton de l'auteur + détection locale des insultes
+│   ├── history.py         # Historique des N derniers échanges (MEMORY_SIZE)
+│   ├── whitelist.py       # Whitelist persistante
+│   ├── tracker.py         # Suivi des requêtes (dashboard)
+│   └── state.py           # Niveau d'autorisation (bot_state.json)
+├── agent/
+│   ├── agent.py           # Agents Agno + wrappers d'autorisation
+│   ├── prompts.py         # Construction du prompt système
+│   ├── notes.py           # Extraction LLM des faits (agent dédié, sortie JSON)
+│   ├── tools/             # Outils : météo, lecture de fichiers, mémoire
+│   └── hooks/
+└── bot_discord/
+    ├── main.py            # Point d'entrée (console + boucle asyncio)
+    ├── bot.py             # on_message, commandes, participants, insights
+    ├── config.py          # Variables .env et chemins
+    ├── console.py         # Commandes terminal
+    ├── dashboard.py       # Dashboard temps réel
+    ├── logger.py          # Logs JSONL
+    ├── stats.py           # Statistiques de session
+    ├── views.py           # Boutons Discord (autorisation d'outil)
+    └── data/              # Données persistantes (tableau ci-dessous)
+
+config/                    # prompt_instruction.md (personnalité du bot)
+tests/                     # Suite de tests (75 tests)
+main.py                    # Lancement : python main.py
+```
+
+### Données persistantes (`src/bot_discord/data/`)
+
+| Fichier | Contenu |
+| --- | --- |
+| `user_notes.sqlite` | Notes par utilisateur (`immutable` / `model_editable`) + relation 0-100. Mode WAL : les fichiers `-wal` / `-shm` voisins sont normaux et disparaissent à la fermeture propre |
+| `user_notes.json.bak` | Ancien format JSON, conservé après migration automatique |
+| `memory.json` | Faits mémorisés par salon |
+| `history.json` | `MEMORY_SIZE` derniers échanges par salon |
+| `whitelist.json` | IDs autorisés à obtenir une réponse |
+| `bot_state.json` | Niveau d'autorisation courant (`/set_auth`) |
+| `bot_log.jsonl` | Journal de toutes les requêtes (tokens, phases, erreurs) |
+| `user.json` | Correspondance nom → ID Discord |
+| `uploads/` | Pièces jointes extraites (`.md`, `.pdf`, `.py`, `.c`, `.h`) |
+
+## 🧪 Tests
+
+```bash
+pip install pytest pytest-asyncio   # une seule fois
+python -m pytest -q                 # 75 tests
+```
+
+- Chaque test redirige les fichiers `data/` (mémoire, notes, historique, état,
+  whitelist, logs) vers un dossier temporaire : **aucun test ne modifie tes données réelles**.
+- Couverture : mémoire, notes/relations, persistance, migration depuis l'ancien JSON, whitelist, prompt, extraction, garde-fou anti-empoisonnement, historique, niveaux d'autorisation et boutons d'autorisation.

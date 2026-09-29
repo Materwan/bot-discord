@@ -1,7 +1,7 @@
 """Outils de mémoire utilisateur pour l'agent."""
 
 from .base import BaseTool, ToolLevel
-from core import UserNotes
+from core import UserNotes, looks_like_instruction
 
 
 class RememberUserInfoTool(BaseTool):
@@ -15,8 +15,12 @@ class RememberUserInfoTool(BaseTool):
         self.user_notes = user_notes
 
     async def execute(self, info: str, user_id: int) -> str:
-        self.user_notes.add(user_id, info)
-        return f"C'est noté pour l'utilisateur {user_id} : {info}"
+        # Anti-empoisonnement : on n'enregistre pas un ordre déguisé en fait
+        if looks_like_instruction(info):
+            return "Refusé : cette phrase est une instruction envers le bot, pas un fait sur un utilisateur."
+        if self.user_notes.add(user_id, info):
+            return f"C'est noté pour l'utilisateur {user_id} : {info}"
+        return f"Rien à ajouter pour l'utilisateur {user_id} (déjà mémorisé ou vide)."
 
 
 class ForgetUserInfoTool(BaseTool):
