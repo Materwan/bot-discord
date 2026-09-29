@@ -15,6 +15,8 @@ from .config import (
     ALLOWED_EXTENSIONS,
     BOT_OWNER_ID,
     MODEL,
+    WHITELIST_FILE,
+    AUTO_NOTES,
 )
 from .logger import JsonlLogger
 from .stats import SessionStats
@@ -22,8 +24,27 @@ from .console import Console
 from .dashboard import TerminalDashboard
 from .views import ToolAuthView
 
-from core import Memory, UserNotes, BotState, RequestTracker
-from agent import create_agent, build_system_prompt, find_related_users, extract_prompt, resolve_mentions, ajouter_pings
+from core import (
+    Memory,
+    UserNotes,
+    BotState,
+    RequestTracker,
+    Whitelist,
+    TONE_DELTAS,
+    DEFAULT_TONE,
+    detect_rudeness,
+)
+from agent import (
+    create_agent,
+    create_notes_agent,
+    build_system_prompt,
+    find_related_users,
+    collect_cited_users,
+    extract_insights,
+    extract_prompt,
+    resolve_mentions,
+    ajouter_pings,
+)
 
 REMEMBER_PREFIX = "/remember"
 FORGET_CMD = "/forget"
@@ -61,6 +82,7 @@ class Bot(discord.Client):
         # Core services
         self.memory = Memory(MEMORY_FILE)
         self.user_notes = UserNotes(NOTES_FILE)
+        self.whitelist = Whitelist(WHITELIST_FILE)
         self.logger = JsonlLogger(LOG_FILE)
         self.stats = SessionStats()
         self.logger.log("start", model=MODEL)
@@ -80,6 +102,9 @@ class Bot(discord.Client):
             state=self.state,
             tracker=self.tracker,
         )
+
+        # Agent dédié à l'extraction automatique de notes (faits + ton des messages)
+        self.notes_agent = create_notes_agent()
 
         # (channel_id, user_id) -> dernier "typing" ; message_id -> dernière modification
         self._typing: dict[tuple[int, int], float] = {}
@@ -181,6 +206,14 @@ class Bot(discord.Client):
             return
         if message.author.bot and message.author.id not in ALLOWED_BOT_IDS:
             return
+        if not self.is_allowed(message.author):
+            # Whitelist : on ignore silencieusement (le bot ne répond qu'aux IDs autorisés)
+            self.logger.log(
+                "whitelist_denied",
+                channel_id=message.channel.id,
+                author_id=message.author.id,
+            )
+            return
         if message.author.id == INFERIOR_BOT_ID:
             await message.reply(INFERIOR_BOT_REPLY)
             return
@@ -208,6 +241,111 @@ class Bot(discord.Client):
         if await self.handle_command(message, prompt):
             return
         await self.answer(message, self.resolve_mentions(message, prompt), uploaded_files)
+        await self.record_insights(message, prompt)
+
+    # ------------------------------------------------------------------
+    # Notes automatiques et niveau de relation
+    # ------------------------------------------------------------------
+    def participants(self, message: discord.Message, prompt: str) -> list:
+        """Auteur du message + les personnes qu'il cite (mentions et noms écrits)."""
+        participants = [message.author]
+        for user in collect_cited_users(message, prompt, self.user):
+            if user not in participants:
+                participants.append(user)
+        return participants
+
+    async def record_insights(self, message: discord.Message, prompt: str) -> None:
+        """Après chaque réponse : sauvegarde des faits utiles + évolution de la relation.
+
+        - L'auteur et les personnes citées sont analysés (agent dédié) ;
+        - les faits nouveaux sont ajoutés dans `model_editable` de user_notes.json ;
+        - le ton de l'auteur (0 à 100 pour la relation) évolue, et une insulte
+          détectée localement le fait toujours baisser.
+        """
+        try:
+            participants = self.participants(message, prompt)
+            if not participants:
+                return
+
+            insights: dict[int, dict] = {}
+            if AUTO_NOTES:
+                try:
+                    insights = await extract_insights(
+                        self.notes_agent, participants, prompt, self.user_notes
+                    )
+                except Exception as e:
+                    self.logger.log("notes_error", error=repr(e))
+
+            # 1. Faits utiles sur l'auteur et les personnes citées
+            facts_saved = 0
+            for user in participants:
+                for fact in (insights.get(user.id) or {}).get("facts", []):
+                    if self.user_notes.add(user.id, fact):
+                        facts_saved += 1
+
+            # 2. Niveau de relation de l'auteur (ton du modèle + filet anti-insultes)
+            tone = (insights.get(message.author.id) or {}).get("tone", DEFAULT_TONE)
+            if detect_rudeness(prompt) and TONE_DELTAS[tone] > TONE_DELTAS["rude"]:
+                tone = "rude"
+            delta = TONE_DELTAS[tone]
+            relationship = self.user_notes.adjust_relationship(message.author.id, delta)
+
+            self.logger.log(
+                "notes",
+                channel_id=message.channel.id,
+                author_id=message.author.id,
+                facts_saved=facts_saved,
+                tone=tone,
+                relationship_delta=delta,
+                relationship=relationship,
+            )
+        except Exception as e:  # une erreur d'analyse ne doit jamais casser la réponse
+            self.logger.log("notes_error", error=repr(e))
+
+    # ------------------------------------------------------------------
+    # Whitelist : le bot ne répond qu'aux IDs autorisés
+    # ------------------------------------------------------------------
+    def is_allowed(self, author) -> bool:
+        """True si l'auteur a le droit d'obtenir une réponse du bot.
+
+        Le propriétaire (BOT_OWNER_ID) est toujours autorisé, même s'il ne
+        figure pas dans la whitelist.
+        """
+        return author.id == BOT_OWNER_ID or author.id in self.whitelist
+
+    def whitelist_reply(self, args: list[str], markdown: bool = True) -> str:
+        """Logique de la commande /whitelist, partagée Discord <-> terminal.
+
+        Usage : /whitelist [add|remove|list] <user_id>
+        """
+        def fmt(user_id: int) -> str:
+            return f"`{user_id}`" if markdown else str(user_id)
+
+        usage_add = "Usage : `/whitelist <add|remove> <user_id>`" if markdown else "Usage : /whitelist <add|remove> <user_id>"
+        usage_all = "Usage : `/whitelist <add|remove|list> [user_id]`" if markdown else "Usage : /whitelist <add|remove|list> [user_id]"
+
+        action = args[0] if args else "list"
+
+        if action == "list":
+            ids = self.whitelist.ids
+            if not ids:
+                return "Whitelist vide : seul le propriétaire est autorisé."
+            lignes = "\n".join(f"- {fmt(user_id)}" for user_id in ids)
+            return f"Whitelist ({len(ids)}) :\n{lignes}"
+
+        if action in ("add", "remove"):
+            if len(args) != 2 or not args[1].isdigit():
+                return usage_add
+            user_id = int(args[1])
+            if action == "add":
+                if self.whitelist.add(user_id):
+                    return f"{fmt(user_id)} ajouté à la whitelist."
+                return f"{fmt(user_id)} est déjà dans la whitelist."
+            if self.whitelist.remove(user_id):
+                return f"{fmt(user_id)} retiré de la whitelist."
+            return f"{fmt(user_id)} n'était pas dans la whitelist."
+
+        return usage_all
 
     # ------------------------------------------------------------------
     # Commandes /remember et /forget
@@ -215,6 +353,14 @@ class Bot(discord.Client):
     async def handle_command(self, message: discord.Message, prompt: str) -> bool:
         """Exécute une commande utilisateur. Renvoie True si le message en était une."""
         low = prompt.lower()
+
+        # Commande /whitelist (Owner seulement)
+        if low.startswith("/whitelist"):
+            if message.author.id != BOT_OWNER_ID:
+                return False  # On ignore si ce n'est pas le propriétaire
+
+            await message.reply(self.whitelist_reply(low.split()[1:]))
+            return True
 
         # Commande /set_auth (Admin seulement)
         if low.startswith("/set_auth"):
@@ -234,7 +380,7 @@ class Bot(discord.Client):
 
         if low.startswith(REMEMBER_PREFIX):
             note = prompt[len(REMEMBER_PREFIX) :].strip()[:MAX_NOTE_LENGTH]
-            self.user_notes.add(message.author.id, note)
+            self.user_notes.add_immutable(message.author.id, note)
             await message.reply("C'est noté !")
             return True
         if low == FORGET_CMD:

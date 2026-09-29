@@ -37,12 +37,28 @@ def find_user_id(user_name: str) -> int | str | None:
     return _read_json(USER_NAME_ID).get(user_name)
 
 
+def relation_label(relationship: int) -> str:
+    """Libellé humain du niveau de relation, injecté dans le prompt."""
+    if relationship >= 80:
+        return "excellente, vous êtes très proches"
+    if relationship >= 60:
+        return "bonne"
+    if relationship >= 40:
+        return "neutre"
+    if relationship >= 20:
+        return "mauvaise, il te parle mal"
+    if relationship > 0:
+        return "très mauvaise, il te fuit"
+    return "inexistante ou très récente"
+
+
 def describe_user(user, role: str, user_notes) -> str:
     """Génère la description d'un utilisateur pour le prompt."""
     instructions = load_user_instructions(user.id)
-    notes = user_notes.get(user.id)
+    notes = user_notes.notes(user.id)
+    relationship = user_notes.relationship(user.id)
 
-    if not instructions and not notes:
+    if not instructions and not notes and not relationship:
         return ""
 
     lines = [f"Informations sur {user.display_name} ({role}) :"]
@@ -53,19 +69,26 @@ def describe_user(user, role: str, user_notes) -> str:
             "Ce qu'on t'a demandé de retenir :\n"
             + "\n".join(f"- {n}" for n in notes)
         )
+    lines.append(
+        f"Niveau de relation : {relationship}/100 — {relation_label(relationship)}."
+    )
     return "\n".join(lines)
 
 
 def has_info(user, user_notes) -> bool:
     """Vérifie si on a des infos sur un utilisateur."""
-    return bool(load_user_instructions(user.id) or user_notes.get(user.id))
+    return bool(
+        load_user_instructions(user.id)
+        or user_notes.notes(user.id)
+        or user_notes.relationship(user.id)
+    )
 
 
-def find_related_users(message, text: str, bot_user, user_notes) -> list:
-    """Trouve les utilisateurs mentionnés ou cités dans le message."""
-    found: dict[int, object] = {}
+def collect_cited_users(message, text: str, bot_user) -> list:
+    """Tous les utilisateurs désignés par le message : auteur + mentions + noms cités."""
+    found: dict[int, object] = {message.author.id: message.author}
 
-    # 1. Mentions explicites (@Paul)
+    # 1. Mentions explicites (<@id> / @Paul)
     for u in message.mentions:
         if u not in (bot_user, message.author) and not u.bot:
             found[u.id] = u
@@ -81,8 +104,14 @@ def find_related_users(message, text: str, bot_user, user_notes) -> list:
             if re.search(rf"(?<!\w){re.escape(name)}(?!\w)", text, re.IGNORECASE):
                 found[m.id] = m
 
-    # On ne garde que ceux pour qui on a quelque chose à dire, puis on limite
-    return [u for u in found.values() if has_info(u, user_notes)][:MAX_OTHERS]
+    return list(found.values())
+
+
+def find_related_users(message, text: str, bot_user, user_notes) -> list:
+    """Utilisateurs cités pour lesquels on a déjà des informations à leur injecter."""
+    cited = collect_cited_users(message, text, bot_user)
+    cited = [u for u in cited if u != message.author]  # l'auteur est ajouté à part
+    return [u for u in cited if has_info(u, user_notes)][:MAX_OTHERS]
 
 
 def build_system_prompt(author, others, memories, user_notes) -> str:

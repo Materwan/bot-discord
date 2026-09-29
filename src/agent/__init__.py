@@ -1,6 +1,6 @@
 """Agent package - Couche IA du bot."""
 
-from .agent import create_agent
+from .agent import create_agent, create_notes_agent
 from .prompts import (
     load_prompt,
     load_user_instructions,
@@ -8,10 +8,17 @@ from .prompts import (
     describe_user,
     has_info,
     find_related_users,
+    collect_cited_users,
     build_system_prompt,
     resolve_mentions,
     extract_prompt,
     ajouter_pings,
+)
+from .notes import (
+    NOTES_SYSTEM_PROMPT,
+    build_extraction_prompt,
+    parse_insights,
+    extract_insights,
 )
 from .tools import (
     BaseTool,
@@ -31,6 +38,7 @@ from .hooks import create_tracker_hooks
 __all__ = [
     # Agent factory
     "create_agent",
+    "create_notes_agent",
     # Prompts
     "load_prompt",
     "load_user_instructions",
@@ -38,10 +46,16 @@ __all__ = [
     "describe_user",
     "has_info",
     "find_related_users",
+    "collect_cited_users",
     "build_system_prompt",
     "resolve_mentions",
     "extract_prompt",
     "ajouter_pings",
+    # Notes automatiques
+    "NOTES_SYSTEM_PROMPT",
+    "build_extraction_prompt",
+    "parse_insights",
+    "extract_insights",
     # Tools
     "BaseTool",
     "ToolLevel",

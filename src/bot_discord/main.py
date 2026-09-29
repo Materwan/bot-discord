@@ -23,7 +23,13 @@ def build_console(bot: Bot) -> Console:
         print("Arrêt du bot...")
         await bot.close()  # fait sortir bot.start()
 
-    return Console({"/token": cmd_token, "/quit": cmd_quit})
+    async def cmd_whitelist(args: list[str]) -> None:
+        # Même logique que la commande Discord, sans contrôle du propriétaire
+        print(bot.whitelist_reply(args, markdown=False))
+
+    return Console(
+        {"/token": cmd_token, "/quit": cmd_quit, "/whitelist": cmd_whitelist}
+    )
 
 
 async def main() -> None:

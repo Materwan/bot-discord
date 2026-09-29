@@ -23,6 +23,7 @@ UPLOADS_DIR = DATA_DIR / "uploads"
 LOG_FILE = DATA_DIR / "bot_log.jsonl"
 MEMORY_FILE = DATA_DIR / "memory.json"
 NOTES_FILE = DATA_DIR / "user_notes.json"
+WHITELIST_FILE = DATA_DIR / "whitelist.json"
 USER_NAME_ID = DATA_DIR / "user.json"
 PROMPT_FILE = ROOT / "config" / "prompt_instruction"
 USERS_FILE = ROOT / "config" / "users.json"
@@ -34,3 +35,12 @@ DEFAULT_PROMPT = "Tu es un bot Discord sympa. Réponds en français, de façon c
 # --- Constantes pour les prompts et mentions ---
 MAX_OTHERS = 3  # nombre max d'autres personnes injectées dans le prompt
 MIN_NAME_LENGTH = 3  # évite les faux positifs sur les pseudos très courts
+
+# --- Notes automatiques (faits + niveau de relation) ---
+# AUTO_NOTES=0 dans le .env désactive l'appel LLM d'extraction après chaque réponse.
+AUTO_NOTES = (os.environ.get("AUTO_NOTES") or "1").strip().lower() not in {
+    "0",
+    "false",
+    "no",
+    "off",
+}

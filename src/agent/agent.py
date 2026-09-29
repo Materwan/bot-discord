@@ -5,6 +5,7 @@ from agno.models.ollama import Ollama
 
 from .tools import create_tool_registry, create_authorization_wrapper, AuthorizationWrapper
 from .prompts import load_prompt
+from .notes import NOTES_SYSTEM_PROMPT
 from core import Memory, UserNotes, BotState, RequestTracker
 from bot_discord.config import MODEL
 import discord
@@ -58,3 +59,15 @@ def create_agent(
     agent._tool_registry = tool_registry
 
     return agent
+
+
+def create_notes_agent() -> Agent:
+    """Agent dédié à l'extraction automatique des notes utilisateurs.
+
+    Aucun outil : il ne fait que renvoyer du JSON (faits + ton de l'auteur),
+    ce qui évite qu'une réponse Discord déclenche des écritures parasites.
+    """
+    return Agent(
+        model=Ollama(id=MODEL),
+        instructions=NOTES_SYSTEM_PROMPT,
+    )
