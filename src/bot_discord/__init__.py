@@ -8,6 +8,7 @@ bot_discord.config), selon l'ordre dans lequel on importe les paquets.
 __all__ = [
     "main",
     "bot",
+    "commands",
     "config",
     "console",
     "logger",

@@ -12,7 +12,8 @@ Ce projet est un bot Discord intelligent propulsé par l'agent **Agno** et le mo
 - **🔐 Whitelist** : Le bot ne répond qu'aux IDs autorisés, stockés dans `src/bot_discord/data/whitelist.json` (le propriétaire reste toujours autorisé).
 - **🧠 Notes Utilisateurs** : À chaque message, le bot analyse l'auteur et les personnes citées, sauvegarde automatiquement les faits utiles et fait évoluer un **niveau de relation (0-100)** — qui baisse quand on lui parle mal. Stockage **SQLite** (`user_notes.sqlite`) : notes horodatées, sélectionnées par pertinence, fusion des doublons proches.
 - **🕘 Historique de conversation** : les `MEMORY_SIZE` derniers échanges par salon sont conservés (`history.json`) et réinjectés en fin de prompt système.
-- **📊 Dashboard Terminal** : Un moniteur en temps réel dans la console affiche les requêtes actives et leur phase de traitement (Processing, Tool Calling, Answering).
+- **📊 Interface Terminal** : une application plein écran (`prompt_toolkit`) garde le **tableau des requêtes actives** en haut et la **ligne de commande en bas**, comme une barre des tâches — sorties en Markdown coloré (`rich`), auto-complétion et historique.
+- **⌨️ Commandes communes** : `argparse` parse une seule et même couche de commandes (`commands.py`), utilisable **dans le terminal** et **dans Discord** (`@NomDuBot /set_relation 70 Erwan`).
 
 ## 🚀 Installation
 
@@ -56,24 +57,71 @@ Ce projet est un bot Discord intelligent propulsé par l'agent **Agno** et le mo
 
 ## 🛠️ Utilisation
 
-### Commandes Utilisateurs
-- `/remember <info>` : Demande au bot de retenir une information sur vous (note **immuable**, le modèle ne peut pas l'effacer).
-- `/forget` : Demande au bot d'effacer tout ce qu'il sait sur vous (notes et niveau de relation).
+Toutes les commandes passent par la **même couche** (`src/bot_discord/commands.py`,
+parsing `argparse`) et fonctionnent **aux deux endroits**, avec la même syntaxe :
 
-### Commandes Administrateur (Propriétaire uniquement)
-- `/set_auth <0|1|2>` : Modifie le niveau d'autorisation automatique des outils.
+| Où | Exemple |
+| --- | --- |
+| Discord | `@NomDuBot /set_relation 70 Erwan` |
+| Terminal | `/set_relation 70 Erwan` |
+
+- Le « / » initial est **facultatif** pour le propriétaire (les deux formes
+  ci-dessus sont équivalentes) ;
+- hors propriétaire, seuls `/remember` et `/forget` restent utilisables, et
+  uniquement avec le « / » (sans lui, « forget » n'est qu'un mot) ;
+- `/quit` exige toujours le « / » dans Discord : un mot « quit » écrit par
+  erreur ne doit pas éteindre le bot ;
+- `/help` affiche la même liste des commandes dans le terminal et dans Discord,
+  `/help <commande>` son aide détaillée ;
+- une erreur de syntaxe renvoie un message **`Usage : …`** (jamais de traceback).
+
+### Commandes utilisateur
+
+- `/remember <info>` : demande au bot de retenir une information sur vous (note **immuable**, le modèle ne peut pas l'effacer).
+- `/forget` : demande au bot d'effacer tout ce qu'il sait sur vous (notes et niveau de relation).
+- `/help [commande]` : liste des commandes / aide d'une commande.
+
+### Commandes du propriétaire
+
+- `/set_relation <0-100> <user_id|nom>` : **fixe** le niveau de relation dans la mémoire
+  (ex. `/set_relation 70 Erwan`). Le nom est résolu via `data/user.json`, puis via le
+  pseudo du serveur ; avec un seul argument, la commande **affiche** la valeur courante.
+  Un événement `set_relation` est journalisé (`bot_log.jsonl`).
+- `/set_auth <0|1|2>` : modifie le niveau d'autorisation automatique des outils.
     - **0** : Toutes les actions sensibles demandent une confirmation par DM.
     - **1** : Les outils de base (comme la lecture de fichiers) sont automatiques.
     - **2** : Presque tous les outils sont automatiques.
-- `/whitelist [add|remove|list] <user_id>` : Gère la whitelist (IDs autorisés à obtenir une réponse).
+- `/whitelist [add|remove|list] [user_id]` : gère la whitelist (IDs autorisés à obtenir une réponse).
     - `add <user_id>` / `remove <user_id>` : ajoute ou retire un ID.
     - `list` (ou sans argument) : affiche les IDs autorisés.
-
-### Commandes terminal (console)
-
-- `/whitelist [add|remove|list] [user_id]` : même logique que Discord, **sans** contrôle du propriétaire.
-- `/token` : statistiques de tokens de la session en cours (`/token -a` : tous les logs).
+- `/token [-a]` : statistiques de tokens (session en cours, ou tous les logs avec `-a`).
 - `/quit` : arrêt propre du bot (sauvegarde de la mémoire, des notes et résumé de session).
+
+### Interface terminal
+
+Le terminal n'est plus une simple ligne `input()` : c'est une application
+**plein écran** (écran alterné, `prompt_toolkit`) qui garde le tableau en haut et la
+ligne de commande en bas, comme une barre des tâches :
+
+```
+Requêtes actives
+┌─────────────┬──────────────────────────────────────┬───────┐
+│ Utilisateur │ Demande                             │ Phase │
+├─────────────┴──────────────────────────────────────┴───────┤
+│ Whitelist (1) :                                             │
+│ - `42`                                                      │
+│ > ligne de commande _                                       │
+└ [/help] [/set_auth] … modèle · requêtes · Ctrl+D quitte ───┘
+```
+
+- le **tableau** des requêtes actives (+ leur phase) reste affiché en haut (`rich`) ;
+- les **sorties** s'affichent en Markdown coloré dans le panneau du milieu ;
+- l'**auto-complétion** propose les commandes, leurs arguments, les IDs et les noms
+  (`prompt_toolkit`), avec un historique persistant (`data/console_history.txt`) ;
+- **PageUp / PageDown / molette** font défiler les sorties ;
+- `Ctrl+C` vide la ligne saisie, `Ctrl+D` ou `/quit` arrête le bot ;
+- si le terminal n'est pas interactif (service, CI), l'interface est simplement
+  désactivée : les commandes restent disponibles depuis Discord.
 
 ## 🔐 Whitelist
 
@@ -188,18 +236,19 @@ src/
 │   ├── tools/             # Outils : météo, lecture de fichiers, mémoire
 │   └── hooks/
 └── bot_discord/
-    ├── main.py            # Point d'entrée (console + boucle asyncio)
-    ├── bot.py             # on_message, commandes, participants, insights
+    ├── main.py            # Point d'entrée (interface + boucle asyncio)
+    ├── bot.py             # on_message, réponses, participants, insights
+    ├── commands.py        # Commandes partagées terminal <-> Discord (argparse)
     ├── config.py          # Variables .env et chemins
-    ├── console.py         # Commandes terminal
-    ├── dashboard.py       # Dashboard temps réel
+    ├── console.py         # Interface plein écran (prompt_toolkit + rich)
+    ├── dashboard.py       # Tableau des requêtes actives (rich)
     ├── logger.py          # Logs JSONL
     ├── stats.py           # Statistiques de session
     ├── views.py           # Boutons Discord (autorisation d'outil)
     └── data/              # Données persistantes (tableau ci-dessous)
 
 config/                    # prompt_instruction.md (personnalité du bot)
-tests/                     # Suite de tests (75 tests)
+tests/                     # Suite de tests (104 tests)
 main.py                    # Lancement : python main.py
 ```
 
@@ -214,6 +263,7 @@ main.py                    # Lancement : python main.py
 | `whitelist.json` | IDs autorisés à obtenir une réponse |
 | `bot_state.json` | Niveau d'autorisation courant (`/set_auth`) |
 | `bot_log.jsonl` | Journal de toutes les requêtes (tokens, phases, erreurs) |
+| `console_history.txt` | Historique de saisie de la ligne de commande (flèches haut/bas) |
 | `user.json` | Correspondance nom → ID Discord |
 | `uploads/` | Pièces jointes extraites (`.md`, `.pdf`, `.py`, `.c`, `.h`) |
 
@@ -221,9 +271,9 @@ main.py                    # Lancement : python main.py
 
 ```bash
 pip install pytest pytest-asyncio   # une seule fois
-python -m pytest -q                 # 75 tests
+python -m pytest -q                 # 104 tests
 ```
 
 - Chaque test redirige les fichiers `data/` (mémoire, notes, historique, état,
   whitelist, logs) vers un dossier temporaire : **aucun test ne modifie tes données réelles**.
-- Couverture : mémoire, notes/relations, persistance, migration depuis l'ancien JSON, whitelist, prompt, extraction, garde-fou anti-empoisonnement, historique, niveaux d'autorisation et boutons d'autorisation.
+- Couverture : mémoire, notes/relations, persistance, migration depuis l'ancien JSON, whitelist, prompt, extraction, garde-fou anti-empoisonnement, historique, niveaux d'autorisation et boutons d'autorisation, **commandes partagées terminal/Discord (argparse, auto-complétion, rendu Markdown et application plein écran)**.

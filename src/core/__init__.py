@@ -1,7 +1,7 @@
 """Core shared modules for the bot."""
 
 from .memory import Memory
-from .users import UserNotes
+from .users import UserNotes, MIN_RELATIONSHIP, MAX_RELATIONSHIP
 from .state import BotState
 from .tracker import RequestTracker, RequestState
 from .whitelist import Whitelist
@@ -13,6 +13,8 @@ from .history import ChannelHistory
 __all__ = [
     "Memory",
     "UserNotes",
+    "MIN_RELATIONSHIP",
+    "MAX_RELATIONSHIP",
     "BotState",
     "RequestTracker",
     "RequestState",

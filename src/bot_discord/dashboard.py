@@ -1,25 +1,41 @@
-import asyncio
-from rich.live import Live
+"""Tableau des requêtes actives du bot (rich, rendu en ANSI).
+
+Le tableau est rendu en chaîne ANSI puis affiché dans le panneau du haut de
+`console.py` : pas de `rich.Live`, qui se battrait avec l'application plein
+écran pour le contrôle du terminal.
+"""
+
+import io
+
+from rich.console import Console as RichConsole
+from rich.markup import escape
 from rich.table import Table
-from rich.console import Console
+
 from core import RequestTracker
 
+
 class TerminalDashboard:
-    """Affiche en temps réel les requêtes actives du bot dans le terminal."""
+    """Tableau « requêtes actives » rendu au format ANSI (rich)."""
 
     def __init__(self, tracker: RequestTracker):
         self.tracker = tracker
-        self.console = Console()
-        self._live = None
-        self._running = False
 
-    def _generate_table(self) -> Table:
-        table = Table(title="🤖 Bot Activity Monitor", show_header=True, header_style="bold magenta")
-        table.add_column("Utilisateur", style="cyan", width=20)
-        table.add_column("Demande", style="white", width=50)
-        table.add_column("Phase", style="green", width=20)
+    def table(self) -> Table:
+        table = Table(
+            # Pas d'emoji ici : la console Windows (codepage OEM) le stocke en
+            # U+FFFD et affiche un carré vide. Les accents et les traits de
+            # cadre passent, eux, sans problème.
+            title="Requêtes actives",
+            show_header=True,
+            header_style="bold magenta",
+        )
+        table.add_column("Utilisateur", style="cyan", max_width=20, no_wrap=True)
+        table.add_column("Demande", style="white", overflow="ellipsis")
+        table.add_column("Phase", style="green", max_width=16, no_wrap=True)
 
+        active = False
         for _, state in self.tracker.get_active_requests():
+            active = True
             # Coloration de la phase
             phase_style = "green"
             if state.phase == "Tool Calling":
@@ -30,24 +46,24 @@ class TerminalDashboard:
                 phase_style = "magenta"
 
             table.add_row(
-                state.user_name,
-                state.summary,
-                f"[{phase_style}]{state.phase}[/{phase_style}]"
+                escape(state.user_name),
+                escape(state.summary),
+                f"[{phase_style}]{escape(state.phase)}[/{phase_style}]",
             )
 
-        if not self.tracker._requests:
+        if not active:
             table.add_row("---", "Aucune requête active", "---")
 
         return table
 
-    async def run(self):
-        """Boucle de rafraîchissement du dashboard."""
-        self._running = True
-        with Live(self._generate_table(), console=self.console, refresh_per_second=10) as live:
-            self._live = live
-            while self._running:
-                live.update(self._generate_table())
-                await asyncio.sleep(0.1)
-
-    def stop(self):
-        self._running = False
+    def render(self, width: int | None = None) -> str:
+        """Tableau en ANSI, prêt à être affiché par prompt_toolkit (`ANSI(...)`)."""
+        console = RichConsole(
+            record=True,
+            force_terminal=True,
+            width=width,
+            file=io.StringIO(),
+            highlight=False,
+        )
+        console.print(self.table())
+        return console.export_text(styles=True)

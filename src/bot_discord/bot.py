@@ -24,7 +24,13 @@ from .config import (
 )
 from .logger import JsonlLogger
 from .stats import SessionStats
-from .console import Console
+from .commands import (
+    CommandContext,
+    build_commands,
+    match_command,
+    run_command,
+    whitelist_action,
+)
 from .dashboard import TerminalDashboard
 from .views import ToolAuthView
 
@@ -49,11 +55,9 @@ from agent import (
     extract_prompt,
     resolve_mentions,
     ajouter_pings,
+    token_usage,
 )
 
-REMEMBER_PREFIX = "/remember"
-FORGET_CMD = "/forget"
-MAX_NOTE_LENGTH = 300
 MAX_MESSAGE_LENGTH = 2000  # limite Discord
 
 INFERIOR_BOT_ID = 1550112364592898048
@@ -96,6 +100,10 @@ class Bot(discord.Client):
         # Dashboard et Tracker
         self.tracker = RequestTracker()
         self.dashboard = TerminalDashboard(self.tracker)
+
+        # Commandes partagées terminal <-> Discord (voir commands.py)
+        self.commands = build_commands()
+        self.console = None  # interface terminal, branchée par main.py
 
         # État et Autorisation
         self.state = BotState(STATE_FILE)
@@ -194,14 +202,25 @@ class Bot(discord.Client):
             return None
 
     # ------------------------------------------------------------------
+    # Sortie terminal
+    # ------------------------------------------------------------------
+    def note(self, text: str) -> None:
+        """Affiche une information dans l'interface terminal.
+
+        Sert de remplaçant à `print()` : pendant que l'interface plein écran
+        est active, un `print()` s'afficherait au travers du tableau.
+        """
+        if self.console is not None and self.console.running:
+            self.console.note(text)
+        else:
+            print(text)
+
+    # ------------------------------------------------------------------
     # Événements Discord
     # ------------------------------------------------------------------
     async def on_ready(self):
-        print(f"Connecté en tant que {self.user} (modèle : {MODEL})")
+        self.note(f"Connecté en tant que **{self.user}** (modèle : {MODEL})")
         self.logger.log("ready", user=str(self.user))
-
-        # Lancement du dashboard dans une tâche de fond
-        self.loop.create_task(self.dashboard.run())
 
     async def on_typing(self, channel, user, when):
         self._typing[(channel.id, user.id)] = time.monotonic()
@@ -329,76 +348,47 @@ class Bot(discord.Client):
 
         Usage : /whitelist [add|remove|list] <user_id>
         """
-        def fmt(user_id: int) -> str:
-            return f"`{user_id}`" if markdown else str(user_id)
-
-        usage_add = "Usage : `/whitelist <add|remove> <user_id>`" if markdown else "Usage : /whitelist <add|remove> <user_id>"
-        usage_all = "Usage : `/whitelist <add|remove|list> [user_id]`" if markdown else "Usage : /whitelist <add|remove|list> [user_id]"
-
-        action = args[0] if args else "list"
-
-        if action == "list":
-            ids = self.whitelist.ids
-            if not ids:
-                return "Whitelist vide : seul le propriétaire est autorisé."
-            lignes = "\n".join(f"- {fmt(user_id)}" for user_id in ids)
-            return f"Whitelist ({len(ids)}) :\n{lignes}"
-
-        if action in ("add", "remove"):
-            if len(args) != 2 or not args[1].isdigit():
-                return usage_add
-            user_id = int(args[1])
-            if action == "add":
-                if self.whitelist.add(user_id):
-                    return f"{fmt(user_id)} ajouté à la whitelist."
-                return f"{fmt(user_id)} est déjà dans la whitelist."
-            if self.whitelist.remove(user_id):
-                return f"{fmt(user_id)} retiré de la whitelist."
-            return f"{fmt(user_id)} n'était pas dans la whitelist."
-
-        return usage_all
+        return whitelist_action(self, args, markdown=markdown)
 
     # ------------------------------------------------------------------
-    # Commandes /remember et /forget
+    # Commandes : même couche que le terminal (voir commands.py)
     # ------------------------------------------------------------------
     async def handle_command(self, message: discord.Message, prompt: str) -> bool:
-        """Exécute une commande utilisateur. Renvoie True si le message en était une."""
-        low = prompt.lower()
+        """Exécute une commande reçue sur Discord. True si le message en était une.
 
-        # Commande /whitelist (Owner seulement)
-        if low.startswith("/whitelist"):
-            if message.author.id != BOT_OWNER_ID:
-                return False  # On ignore si ce n'est pas le propriétaire
+        Le propriétaire peut taper `@NomDuBot /set_relation 70 Erwan` (le « / »
+        devient optionnel pour lui) : la ligne part dans `run_command()`, la
+        même couche que le terminal. Un autre auteur n'a accès qu'à /remember
+        et /forget, et uniquement avec le « / » (sinon « forget » tout court
+        serait une phrase, pas une commande).
+        """
+        if not prompt.strip():
+            return False
 
-            await message.reply(self.whitelist_reply(low.split()[1:]))
-            return True
+        owner = message.author.id == BOT_OWNER_ID
+        command = match_command(prompt, self.commands, allow_bare=owner)
+        if command is None:
+            return False
+        if command.owner_only and not owner:
+            return False  # non propriétaire : la commande n'existe pas pour lui
 
-        # Commande /set_auth (Admin seulement)
-        if low.startswith("/set_auth"):
-            if message.author.id != BOT_OWNER_ID:
-                return False  # On ignore si ce n'est pas le propriétaire
+        ctx = CommandContext(
+            bot=self,
+            source="discord",
+            user_id=message.author.id,
+            message=message,
+        )
+        reply = await run_command(prompt, ctx, commands=self.commands)
+        if reply:  # /quit a déjà répondu lui-même avant la fermeture
+            await self.reply_output(message, reply)
+        return True
 
-            parts = low.split()
-            if len(parts) == 2 and parts[1].isdigit():
-                level = int(parts[1])
-                if 0 <= level <= 2:
-                    self.state.set_auth_level(level)
-                    await message.reply(f"Le niveau d'autorisation automatique a été fixé à {level}.")
-                    return True
-
-            await message.reply("Usage : `/set_auth <0|1|2>`")
-            return True
-
-        if low.startswith(REMEMBER_PREFIX):
-            note = prompt[len(REMEMBER_PREFIX) :].strip()[:MAX_NOTE_LENGTH]
-            self.user_notes.add_immutable(message.author.id, note)
-            await message.reply("C'est noté !")
-            return True
-        if low == FORGET_CMD:
-            self.user_notes.clear(message.author.id)
-            await message.reply("J'ai tout oublié te concernant.")
-            return True
-        return False
+    async def reply_output(self, message: discord.Message, text: str) -> None:
+        """Répond en une ou plusieurs fois (limite Discord : 2000 caractères)."""
+        parts = decouper(text, MAX_MESSAGE_LENGTH)
+        await message.reply(parts[0])
+        for part in parts[1:]:
+            await message.channel.send(part)
 
     # ------------------------------------------------------------------
     # Génération de la réponse via l'agent
@@ -425,7 +415,7 @@ class Bot(discord.Client):
                 self.tracker.update_phase(message.id, "Answering")
                 reponse = resp.content or "..."
         except Exception as e:
-            print(f"Erreur Agno : {e}")
+            self.note(f"**Erreur Agno** : `{e}`")
             self.logger.log("error", channel_id=channel_id, error=repr(e))
             await message.reply("Désolé, je n'ai pas réussi à générer une réponse.")
             return
@@ -433,10 +423,10 @@ class Bot(discord.Client):
             # Suppression de la requête du dashboard une fois terminée
             self.tracker.complete_request(message.id)
 
-        # On ne peut pas facilement récupérer les tokens exacts depuis arun()
-        # sans accéder aux détails du modèle, on met 0 par défaut pour les stats
-        prompt_tokens = 0
-        completion_tokens = 0
+        # Tokens réellement consommés (mesures Agno : resp.metrics).
+        # Sans mesure (fournisseur sans compteur), on compte 0 plutôt que
+        # de fausser les totaux.
+        prompt_tokens, completion_tokens = token_usage(resp)
         self.stats.add(prompt_tokens, completion_tokens)
 
         self.logger.log(
@@ -469,8 +459,10 @@ class Bot(discord.Client):
     # Erreurs et arrêt
     # ------------------------------------------------------------------
     async def on_error(self, event_method, *args, **kwargs):
-        self.logger.log("exception", event_method=event_method, trace=traceback.format_exc())
-        traceback.print_exc()
+        trace = traceback.format_exc()
+        self.logger.log("exception", event_method=event_method, trace=trace)
+        # Pas de print() : la trace part dans le panneau de la console
+        self.note(f"**Exception** (`{event_method}`) :\n```\n{trace.rstrip()}\n```")
 
     def shutdown(self) -> None:
         """Sauvegarde finale + résumé de session (appelé quel que soit le mode d'arrêt)."""

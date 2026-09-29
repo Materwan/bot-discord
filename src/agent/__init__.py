@@ -20,6 +20,7 @@ from .notes import (
     parse_insights,
     extract_insights,
 )
+from .usage import token_usage
 from .tools import (
     BaseTool,
     ToolLevel,
@@ -39,6 +40,8 @@ __all__ = [
     # Agent factory
     "create_agent",
     "create_notes_agent",
+    # Tokens
+    "token_usage",
     # Prompts
     "load_prompt",
     "load_user_instructions",
