@@ -3,18 +3,29 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "bot-discord"
-version = "1.0.0"
-description = "Bot Discord branché sur Ollama, avec mémoire, logs JSONL et commandes console"
+name = "clara"
+version = "2.0.0"
+description = "Clara: a Discord bot powered by Ollama, with per-user memory, a JSONL event log and a terminal console"
 requires-python = ">=3.11"
 dependencies = [
     "discord.py>=2.4",
     "ollama>=0.4",
+    "pypdf>=4.0",
     "python-dotenv>=1.0",
     "rich>=13.0",
     "prompt_toolkit>=3.0",
 ]
 
-[project.scripts]
-bot_discord = "bot_discord.main:run"
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-asyncio>=0.23"]
 
+[project.scripts]
+clara = "clara.app:run"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+asyncio_mode = "auto"

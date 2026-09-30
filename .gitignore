@@ -1,12 +1,9 @@
 .env
-.dist
-dist/
-.vscode
 data/
 __pycache__/
 *.egg-info/
 .venv/
-config/
-tests/
-.claude/
+.vscode/
 .pytest_cache/
+.dist/
+build/
