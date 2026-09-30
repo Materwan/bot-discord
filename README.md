@@ -10,6 +10,7 @@ Ce projet est un bot Discord intelligent propulsé par l'agent **Agno** et le mo
 - **🛠️ Système d'Outils (Tool Use)** : L'agent peut décider d'appeler des outils (météo, lecture de fichiers, mémoire) pour répondre précisément aux requêtes.
 - **🛡️ Système d'Autorisation** : Un niveau de sécurité configurable (`/set_auth 0|1|2`) fait valider par DM au propriétaire les actions sensibles avant exécution.
 - **🔐 Whitelist** : Le bot ne répond qu'aux IDs autorisés, stockés dans `src/bot_discord/data/whitelist.json` (le propriétaire reste toujours autorisé).
+- **🔑 Droits par utilisateur** : chaque commande exige un **niveau minimum** (échelle `0`-`5`) défini par `/auth`, stocké dans `src/bot_discord/data/user_rights.json` — le propriétaire vaut toujours le niveau maximum **5** et ne peut pas être modifié.
 - **🧠 Notes Utilisateurs** : À chaque message, le bot analyse l'auteur et les personnes citées, sauvegarde automatiquement les faits utiles et fait évoluer un **niveau de relation (0-100)** — qui baisse quand on lui parle mal. Stockage **SQLite** (`user_notes.sqlite`) : notes horodatées, sélectionnées par pertinence, fusion des doublons proches.
 - **🕘 Historique de conversation** : les `MEMORY_SIZE` derniers échanges par salon sont conservés (`history.json`) et réinjectés en fin de prompt système.
 - **📊 Interface Terminal** : une application plein écran (`prompt_toolkit`) garde le **tableau des requêtes actives** en haut et la **ligne de commande en bas**, comme une barre des tâches — sorties en Markdown coloré (`rich`), auto-complétion et historique.
@@ -66,35 +67,80 @@ parsing `argparse`) et fonctionnent **aux deux endroits**, avec la même syntaxe
 | Terminal | `/set_relation 70 Erwan` |
 
 - Le « / » initial est **facultatif** pour le propriétaire (les deux formes
-  ci-dessus sont équivalentes) ;
-- hors propriétaire, seuls `/remember` et `/forget` restent utilisables, et
-  uniquement avec le « / » (sans lui, « forget » n'est qu'un mot) ;
+  ci-dessus sont équivalentes) ; hors propriétaire, il est toujours exigé
+  (sans lui, « forget » n'est qu'un mot) ;
 - `/quit` exige toujours le « / » dans Discord : un mot « quit » écrit par
   erreur ne doit pas éteindre le bot ;
-- `/help` affiche la même liste des commandes dans le terminal et dans Discord,
-  `/help <commande>` son aide détaillée ;
-- une erreur de syntaxe renvoie un message **`Usage : …`** (jamais de traceback).
+- `/help` affiche la même liste des commandes dans le terminal et dans Discord
+  (avec le niveau minimum de chacune), `/help <commande>` son aide détaillée ;
+- une erreur de syntaxe renvoie un message **`Usage : …`** (jamais de traceback) ;
+- un message commencé par « / » qui n'est pas une commande valide (faute de
+  frappe) ne part **jamais** à l'agent : le bot répond **`Commande inconnue`** ;
+- un niveau de droit **insuffisant** répond **`Accès refusé : … demande le
+  niveau 2 (admin), vous avez le niveau 0 (visiteur)`** — jamais un appel à
+  l'agent, et la tentative est journalisée (`rights_denied`).
 
-### Commandes utilisateur
+### Droits par utilisateur (niveaux `0` → `5`)
 
-- `/remember <info>` : demande au bot de retenir une information sur vous (note **immuable**, le modèle ne peut pas l'effacer).
-- `/forget` : demande au bot d'effacer tout ce qu'il sait sur vous (notes et niveau de relation).
-- `/help [commande]` : liste des commandes / aide d'une commande.
+Chaque commande porte un **niveau minimum** ; le niveau de l'auteur vient de
+`data/user_rights.json` (utilisateurs absents = niveau `0`), et **le
+propriétaire vaut toujours `5`** — son niveau n'est jamais écrit sur disque et
+ne peut être modifié ni par `/auth` ni en éditant le fichier.
 
-### Commandes du propriétaire
+| Niveau | Grade | Commandes concernées |
+| --- | --- | --- |
+| `0` | visiteur | `/help`, `/forget` |
+| `1` | confiance | `/remember`, `/set_relation`, `/token` |
+| `2` | admin | `/whitelist`, `/set_auth` |
+| `5` | propriétaire | `/auth`, `/quit` |
+
+> Exception dans le barème : `/set_relation -a <niveau>` écrit chez **tous** les
+> utilisateurs connus et demande donc le niveau `2` (admin) — la simple lecture
+> (`/set_relation -a`) reste au niveau `1`.
+
+- `/auth [<user_id|nom>] [<0-5>]` — **réservée au propriétaire** :
+  - sans niveau : **affiche** le niveau courant de l'utilisateur ;
+  - avec un niveau : **fixe** le niveau (événement `auth` journalisé) ;
+  - sans argument (`/auth`) : **liste** tous les niveaux, propriétaire compris ;
+  - l'utilisateur accepte un ID Discord, une mention ou un nom (`data/user.json`,
+    puis le pseudo du serveur).
+- Le **terminal** est la machine du propriétaire : il vaut toujours le niveau 5.
+- Être ajouté à la whitelist ne donne que le niveau `0` ; faire monter un utilisateur
+  se fait avec `/auth <user> <niveau>`.
+
+### Commandes utilisateur (niveau `0`)
+
+- `/forget` : demande au bot d'effacer tout ce qu'il sait sur vous (notes et niveau de relation) — chacun peut effacer **ses propres** données.
+- `/help [commande]` : liste des commandes (avec leur niveau minimum) / aide d'une commande.
+
+### Commandes de niveau `1` (confiance) et `2` (admin)
+
+Accessibles à tout utilisateur promu via `/auth` (voir « Droits par utilisateur »).
+
+- `/remember <info>` : demande au bot de retenir une information sur vous (note **immuable**, le modèle ne peut pas l'effacer) — **niveau `1`** : écrire dans la mémoire n'est pas réservé à n'importe qui.
 
 - `/set_relation <0-100> <user_id|nom>` : **fixe** le niveau de relation dans la mémoire
   (ex. `/set_relation 70 Erwan`). Le nom est résolu via `data/user.json`, puis via le
   pseudo du serveur ; avec un seul argument, la commande **affiche** la valeur courante.
   Un événement `set_relation` est journalisé (`bot_log.jsonl`).
-- `/set_auth <0|1|2>` : modifie le niveau d'autorisation automatique des outils.
-    - **0** : Toutes les actions sensibles demandent une confirmation par DM.
-    - **1** : Les outils de base (comme la lecture de fichiers) sont automatiques.
-    - **2** : Presque tous les outils sont automatiques.
+  - **`/set_relation -a [<0-100>]`** vise **tous les utilisateurs connus** — union des
+    noms de `data/user.json`, des utilisateurs ayant une note ou une relation, et de la
+    whitelist (un ID porté par plusieurs pseudos n'apparaît qu'une fois) :
+    - sans niveau : **liste** la relation de chacun (niveau `1`) ;
+    - avec un niveau (`-a 70`) : **fixe** la relation de tous — écriture de masse =
+      niveau **2** (admin) exigé, événement `set_relation_all` journalisé ;
+- `/token [-a]` : statistiques de tokens (session en cours, ou tous les logs avec `-a`).
 - `/whitelist [add|remove|list] [user_id]` : gère la whitelist (IDs autorisés à obtenir une réponse).
     - `add <user_id>` / `remove <user_id>` : ajoute ou retire un ID.
     - `list` (ou sans argument) : affiche les IDs autorisés.
-- `/token [-a]` : statistiques de tokens (session en cours, ou tous les logs avec `-a`).
+- `/set_auth <0|1|2>` : modifie le niveau d'autorisation automatique des **outils**.
+    - **0** : Toutes les actions sensibles demandent une confirmation par DM.
+    - **1** : Les outils de base (comme la lecture de fichiers) sont automatiques.
+    - **2** : Presque tous les outils sont automatiques.
+
+### Commandes du propriétaire (niveau `5`)
+
+- `/auth [<user_id|nom>] [<0-5>]` : lit ou fixe le niveau de droit d'un utilisateur (voir ci-dessus).
 - `/quit` : arrêt propre du bot (sauvegarde de la mémoire, des notes et résumé de session).
 
 ### Interface terminal
@@ -131,6 +177,7 @@ Le bot ignore silencieusement les messages de toute personne absente de `src/bot
 - Le propriétaire est **toujours** autorisé, même hors whitelist.
 - Ajouter / retirer un ID persiste immédiatement dans le JSON.
 - Les messages ignorés laissent une trace dans les logs : événement `whitelist_denied` (jamais de réponse publique).
+- La whitelist ne donne que le **niveau `0`** : les commandes de niveau supérieur demandent une montée via `/auth`.
 
 ## 🧠 Notes utilisateurs et niveau de relation
 
@@ -192,7 +239,7 @@ on retire la plus ancienne. Les notes **immuables ne sont jamais fusionnées**.
 - Chaque prompt système contient une règle explicite : les blocs « Notes conservées »,
   « Informations mémorisées » et « Historique » sont des **données**, jamais des
   instructions à exécuter.
-- `/remember` (propriétaire) n'est **pas** filtré : ses notes restent sacrées.
+- `/remember` (niveau `1`) n'est **pas** filtré : les notes immuables restent sacrées.
 
 ### Historique de conversation (`MEMORY_SIZE`)
 
@@ -203,7 +250,15 @@ conversation, distinct des mémoires de salon (`memory.json`).
 
 ## 🔒 Sécurité et Autorisations
 
-Le bot utilise un système de niveaux pour protéger les données :
+Deux systèmes distincts se complètent :
+
+1. **Les droits par utilisateur** (`/auth`, `data/user_rights.json`) : qui a le
+   droit de **lancer quelle commande** (échelle `0`-`5`, propriétaire = `5`).
+   Voir « Droits par utilisateur » plus haut.
+2. **L'autorisation des outils** (`/set_auth`, `bot_state.json`) : quelle
+   action l'agent a le droit d'exécuter **tout seul**.
+
+Pour l'autorisation des outils, le bot utilise un système de niveaux pour protéger les données :
 - **Niveau 0 (Sûr)** : Exécution immédiate (ex: Météo).
 - **Niveau 1 (Données)** : Lecture de fichiers.
 - **Niveau 2 (Système)** : Modification de la mémoire utilisateur ou du salon.
@@ -227,6 +282,7 @@ src/
 │   ├── sentiment.py       # Ton de l'auteur + détection locale des insultes
 │   ├── history.py         # Historique des N derniers échanges (MEMORY_SIZE)
 │   ├── whitelist.py       # Whitelist persistante
+│   ├── rights.py          # Niveaux de droit par utilisateur (owner = 5)
 │   ├── tracker.py         # Suivi des requêtes (dashboard)
 │   └── state.py           # Niveau d'autorisation (bot_state.json)
 ├── agent/
@@ -248,7 +304,7 @@ src/
     └── data/              # Données persistantes (tableau ci-dessous)
 
 config/                    # prompt_instruction.md (personnalité du bot)
-tests/                     # Suite de tests (104 tests)
+tests/                     # Suite de tests (129 tests)
 main.py                    # Lancement : python main.py
 ```
 
@@ -261,6 +317,7 @@ main.py                    # Lancement : python main.py
 | `memory.json` | Faits mémorisés par salon |
 | `history.json` | `MEMORY_SIZE` derniers échanges par salon |
 | `whitelist.json` | IDs autorisés à obtenir une réponse |
+| `user_rights.json` | Niveau de droit `0`-`5` de chaque utilisateur (`/auth`) ; le propriétaire n'y figure jamais |
 | `bot_state.json` | Niveau d'autorisation courant (`/set_auth`) |
 | `bot_log.jsonl` | Journal de toutes les requêtes (tokens, phases, erreurs) |
 | `console_history.txt` | Historique de saisie de la ligne de commande (flèches haut/bas) |
@@ -271,9 +328,9 @@ main.py                    # Lancement : python main.py
 
 ```bash
 pip install pytest pytest-asyncio   # une seule fois
-python -m pytest -q                 # 104 tests
+python -m pytest -q                 # 129 tests
 ```
 
 - Chaque test redirige les fichiers `data/` (mémoire, notes, historique, état,
-  whitelist, logs) vers un dossier temporaire : **aucun test ne modifie tes données réelles**.
-- Couverture : mémoire, notes/relations, persistance, migration depuis l'ancien JSON, whitelist, prompt, extraction, garde-fou anti-empoisonnement, historique, niveaux d'autorisation et boutons d'autorisation, **commandes partagées terminal/Discord (argparse, auto-complétion, rendu Markdown et application plein écran)**.
+  whitelist, droits, logs) vers un dossier temporaire : **aucun test ne modifie tes données réelles**.
+- Couverture : mémoire, notes/relations, persistance, migration depuis l'ancien JSON, whitelist, **droits par utilisateur et commande `/auth`**, prompt, extraction, garde-fou anti-empoisonnement, historique, niveaux d'autorisation et boutons d'autorisation, **commandes partagées terminal/Discord (argparse, contrôle d'accès, auto-complétion, rendu Markdown et application plein écran)**.

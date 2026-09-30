@@ -20,12 +20,14 @@ from .config import (
     BOT_OWNER_ID,
     MODEL,
     WHITELIST_FILE,
+    RIGHTS_FILE,
     AUTO_NOTES,
 )
 from .logger import JsonlLogger
 from .stats import SessionStats
 from .commands import (
     CommandContext,
+    UNKNOWN_COMMAND,
     build_commands,
     match_command,
     run_command,
@@ -40,6 +42,7 @@ from core import (
     BotState,
     RequestTracker,
     Whitelist,
+    UserRights,
     ChannelHistory,
     TONE_DELTAS,
     DEFAULT_TONE,
@@ -92,6 +95,7 @@ class Bot(discord.Client):
         self.memory = Memory(MEMORY_FILE)
         self.user_notes = UserNotes(NOTES_FILE, legacy_path=LEGACY_NOTES_FILE)
         self.whitelist = Whitelist(WHITELIST_FILE)
+        self.rights = UserRights(RIGHTS_FILE, BOT_OWNER_ID)
         self.history = ChannelHistory(HISTORY_FILE, max_entries=MEMORY_SIZE)
         self.logger = JsonlLogger(LOG_FILE)
         self.stats = SessionStats()
@@ -127,7 +131,9 @@ class Bot(discord.Client):
     # ------------------------------------------------------------------
     # Construction du prompt (délégué à agent.prompts)
     # ------------------------------------------------------------------
-    def build_prompt_context(self, message: discord.Message, prompt: str, uploaded_files: list[str] = None) -> str:
+    def build_prompt_context(
+        self, message: discord.Message, prompt: str, uploaded_files: list[str] = None
+    ) -> str:
         """Construit le contexte complet pour l'agent."""
         channel_id = message.channel.id
         author = message.author
@@ -167,6 +173,7 @@ class Bot(discord.Client):
 
     def ajouter_pings(self, texte: str) -> str:
         from agent import find_user_id
+
         return ajouter_pings(texte, self.user, find_user_id)
 
     # ------------------------------------------------------------------
@@ -270,7 +277,9 @@ class Bot(discord.Client):
 
         if await self.handle_command(message, prompt):
             return
-        await self.answer(message, self.resolve_mentions(message, prompt), uploaded_files)
+        await self.answer(
+            message, self.resolve_mentions(message, prompt), uploaded_files
+        )
         await self.record_insights(message, prompt)
 
     # ------------------------------------------------------------------
@@ -358,19 +367,31 @@ class Bot(discord.Client):
 
         Le propriétaire peut taper `@NomDuBot /set_relation 70 Erwan` (le « / »
         devient optionnel pour lui) : la ligne part dans `run_command()`, la
-        même couche que le terminal. Un autre auteur n'a accès qu'à /remember
-        et /forget, et uniquement avec le « / » (sinon « forget » tout court
-        serait une phrase, pas une commande).
+        même couche que le terminal. Un autre auteur ne peut pas se passer du
+        « / » (sinon « forget » tout court serait une phrase, pas une
+        commande).
+
+        Le niveau de droit de l'auteur (`bot.rights`, propriétaire = `OWNER_LEVEL`)
+        est comparé au `min_level` de la commande dans `execute_command()` : un
+        niveau insuffisant répond « Accès refusé » et trace `rights_denied`.
+
+        Un message commencé par « / » est toujours lu comme une commande : si
+        elle est inconnue (faute de frappe), le bot répond `Commande inconnue`
+        et l'agent n'est jamais appelé.
         """
-        if not prompt.strip():
+        text = prompt.strip()
+        if not text:
             return False
 
         owner = message.author.id == BOT_OWNER_ID
-        command = match_command(prompt, self.commands, allow_bare=owner)
+        command = match_command(text, self.commands, allow_bare=owner)
         if command is None:
+            # « /xxx » : l'auteur voulait une commande. On ne laisse pas
+            # l'agent y répondre en langage naturel.
+            if text.startswith("/"):
+                await self.reply_output(message, UNKNOWN_COMMAND)
+                return True
             return False
-        if command.owner_only and not owner:
-            return False  # non propriétaire : la commande n'existe pas pour lui
 
         ctx = CommandContext(
             bot=self,
@@ -378,7 +399,7 @@ class Bot(discord.Client):
             user_id=message.author.id,
             message=message,
         )
-        reply = await run_command(prompt, ctx, commands=self.commands)
+        reply = await run_command(text, ctx, commands=self.commands)
         if reply:  # /quit a déjà répondu lui-même avant la fermeture
             await self.reply_output(message, reply)
         return True
@@ -393,7 +414,9 @@ class Bot(discord.Client):
     # ------------------------------------------------------------------
     # Génération de la réponse via l'agent
     # ------------------------------------------------------------------
-    async def answer(self, message: discord.Message, prompt: str, uploaded_files: list[str] = None) -> None:
+    async def answer(
+        self, message: discord.Message, prompt: str, uploaded_files: list[str] = None
+    ) -> None:
         channel_id = message.channel.id
 
         # Lancement du tracking de la requête

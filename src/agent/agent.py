@@ -3,7 +3,11 @@
 from agno.agent import Agent
 from agno.models.ollama import Ollama
 
-from .tools import create_tool_registry, create_authorization_wrapper, AuthorizationWrapper
+from .tools import (
+    create_tool_registry,
+    create_authorization_wrapper,
+    AuthorizationWrapper,
+)
 from .prompts import load_prompt
 from .notes import NOTES_SYSTEM_PROMPT
 from core import Memory, UserNotes, BotState, RequestTracker
@@ -16,7 +20,7 @@ def create_agent(
     memory: Memory,
     user_notes: UserNotes,
     state: BotState,
-    tracker: RequestTracker
+    tracker: RequestTracker,
 ) -> Agent:
     """
     Crée et configure l'agent Agno avec tous ses outils.
@@ -44,16 +48,13 @@ def create_agent(
         # sans ça, tous les outils s'appellent "execute", Agno les confond et
         # get_level("execute") renvoie FREE -> aucune autorisation ne s'applique.
         wrapped = create_authorization_wrapper(
-            tool.to_agno_tool(),
-            auth_wrapper,
-            tracker
+            tool.to_agno_tool(), auth_wrapper, tracker
         )
         agno_tools.append(wrapped)
 
     # Création de l'agent
     agent = Agent(
         model=Ollama(id=MODEL),
-        tools=agno_tools,
         instructions=load_prompt(),
     )
 

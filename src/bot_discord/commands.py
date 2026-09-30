@@ -10,6 +10,11 @@ Les deux passent par `run_command()` ; seule la `CommandContext.source` change
 (`"console"` ou `"discord"`). La console étant l'ordinateur du propriétaire,
 `source="console"` vaut toujours propriétaire.
 
+Chaque commande porte un `min_level` (échelle `0`-`MAX_LEVEL`, voir
+`core/rights.py`) : `execute_command()` compare ce niveau à celui de l'auteur
+(`bot.rights`) et répond « Accès refusé » sinon. Le propriétaire vaut
+`OWNER_LEVEL` et ne peut pas être modifié (`/auth`).
+
 `run_command()` renvoie **toujours** du Markdown : soit le résultat, soit un
 message d'erreur commençant par « Usage : … ». La console l'affiche avec
 `rich.Markdown`, Discord l'envoie tel quel (mêmes sé Markdown).
@@ -26,7 +31,13 @@ import shlex
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
-from core import MAX_RELATIONSHIP, MIN_RELATIONSHIP
+from core import (
+    MAX_LEVEL,
+    MAX_RELATIONSHIP,
+    MIN_RELATIONSHIP,
+    OWNER_LEVEL,
+    level_label,
+)
 
 from .config import BOT_OWNER_ID, USER_NAME_ID
 from .stats import SessionStats
@@ -38,6 +49,18 @@ MAX_NOTE_LENGTH = 300
 USAGE_WHITELIST = "/whitelist [add|remove|list] [user_id]"
 USAGE_SET_AUTH = "/set_auth <0|1|2>"
 USAGE_SET_RELATION = "/set_relation <0-100> <user_id|nom>"
+USAGE_SET_RELATION_ALL = "/set_relation -a [<0-100>]"
+USAGE_SET_RELATION_FULL = "/set_relation [-a] [<0-100>] [<user_id|nom>]"
+USAGE_AUTH = "/auth [<user_id|nom>] [<0-5>]"
+
+# Écrire la relation de TOUS les utilisateurs touche forcément des gens que
+# l'auteur n'a pas choisis : ça demande le niveau admin, pas « confiance ».
+SET_RELATION_MASS_LEVEL = 2
+
+# Réponse unique quand un message commencé par « / » n'est pas une commande
+# valide (faute de frappe, commande inexistante ou réservée) : le bot ne laisse
+# jamais l'agent y répondre en langage naturel.
+UNKNOWN_COMMAND = "Commande inconnue"
 
 Handler = Callable[[argparse.Namespace, "CommandContext"], "str | Awaitable[str]"]
 
@@ -133,17 +156,95 @@ class CommandContext:
 
 @dataclass
 class Command:
+    """Une commande et le niveau de droit minimum pour l'exécuter.
+
+    `min_level` se lit sur l'échelle `0`-`MAX_LEVEL` : `0` pour tout le monde
+    (whitelistée), `OWNER_LEVEL` pour le propriétaire seul.
+    """
+
     name: str  # "/whitelist"
     summary: str
     parser: CommandParser
     handler: Handler
-    owner_only: bool = True
+    min_level: int = OWNER_LEVEL
     require_slash: bool = False  # interdit la forme sans « / » (ex. /quit)
     free_text: bool = False  # dernier argument = texte brut (apostrophes…)
 
 
 def is_owner(user_id: int | None) -> bool:
     return user_id == BOT_OWNER_ID
+
+
+# ----------------------------------------------------------------------
+# Niveaux de droit : une seule règle, appliquée par execute_command()
+# ----------------------------------------------------------------------
+def context_level(ctx: CommandContext) -> int:
+    """Niveau de l'auteur de la ligne.
+
+    Le terminal est la machine du propriétaire : `source="console"` vaut
+    toujours `OWNER_LEVEL`. Sur Discord, le niveau vient de `bot.rights`
+    (le propriétaire inclus, qui vaut `OWNER_LEVEL` par construction).
+    """
+    if ctx.source == "console":
+        return OWNER_LEVEL
+    rights = getattr(ctx.bot, "rights", None)
+    if rights is None:
+        return 0
+    return rights.level(ctx.user_id)
+
+
+def _level_name(level: int) -> str:
+    """« (admin) » pour un grade nommé, rien pour les grades sans nom."""
+    label = level_label(level)
+    return "" if label.startswith("niveau ") else f" ({label})"
+
+
+def _level_requirement(command: Command) -> str:
+    """Annotation de fin de ligne dans `/help` (vide pour les commandes à tous)."""
+    if command.min_level <= 0:
+        return ""
+    if command.min_level == OWNER_LEVEL:
+        return " *(propriétaire)*"
+    grade = level_label(command.min_level)
+    if grade.startswith("niveau "):  # grade encore sans nom
+        return f" *(niveau {command.min_level})*"
+    return f" *(niveau {command.min_level} — {grade})*"
+
+
+def access_denied(name: str, required: int, level: int) -> str:
+    """Réponse explicite quand le niveau de l'auteur est insuffisant."""
+    return (
+        f"**Accès refusé** : `{name}` demande le niveau "
+        f"**{required}**{_level_name(required)}, "
+        f"vous avez le niveau **{level}**{_level_name(level)}."
+    )
+
+
+def check_access(name: str, required: int, ctx: CommandContext) -> str | None:
+    """Message de refus (avec trace `rights_denied`), ou `None` si c'est bon.
+
+    `required` peut dépasser le `min_level` de la commande selon l'argument
+    passé : `/set_relation -a <niveau>` écrit chez **tout le monde**, donc 2.
+    """
+    level = context_level(ctx)
+    if level >= required:
+        return None
+    logger = getattr(ctx.bot, "logger", None)
+    if logger is not None:
+        logger.log(
+            "rights_denied",
+            command=name,
+            required=required,
+            level=level,
+            source=ctx.source,
+            by=ctx.user_id,
+        )
+    return access_denied(name, required, level)
+
+
+def check_level(command: Command, ctx: CommandContext) -> str | None:
+    """Contrôle standard : le `min_level` déclaré sur la commande."""
+    return check_access(command.name, command.min_level, ctx)
 
 
 # ----------------------------------------------------------------------
@@ -259,10 +360,11 @@ def _handle_help(namespace: argparse.Namespace, ctx: CommandContext) -> str:
 
     # La liste est la même des deux côtés : tout ce qui marche dans le terminal
     # marche aussi depuis Discord (et inversement).
-    lines = ["**Commandes disponibles**", ""]
+    lines = ["**Commandes disponibles**, avec le niveau minimum requis :", ""]
     for command in sorted(ctx.bot.commands.values(), key=lambda c: c.name):
-        owner = " *(propriétaire)*" if command.owner_only else ""
-        lines.append(f"- `{command.name}` — {command.summary}{owner}")
+        lines.append(
+            f"- `{command.name}` — {command.summary}{_level_requirement(command)}"
+        )
     lines += [
         "",
         "Même syntaxe partout : dans le terminal (`/set_relation 70 Erwan`) "
@@ -286,6 +388,60 @@ def _handle_set_auth(namespace: argparse.Namespace, ctx: CommandContext) -> str:
     return f"Le niveau d'autorisation automatique a été fixé à **{namespace.level}**."
 
 
+def _handle_auth(namespace: argparse.Namespace, ctx: CommandContext) -> str:
+    """Affiche ou fixe le niveau de droit d'un utilisateur (owner uniquement)."""
+    rights = ctx.bot.rights
+
+    # Sans argument : la liste complète des niveaux.
+    if not namespace.user:
+        owner_label = _user_label(rights.owner_id)
+        lines = [
+            f"- {owner_label} — **{OWNER_LEVEL}** (propriétaire), immuable"
+        ]
+        for user_id, level in rights.entries:
+            lines.append(f"- {_user_label(user_id)} — **{level}**{_level_name(level)}")
+        return f"**Niveaux de droit** ({len(lines)}) :\n" + "\n".join(lines)
+
+    user_id = resolve_user_id(namespace.user, ctx)
+    if user_id is None:
+        raise CommandError(
+            f"**Utilisateur introuvable** : `{namespace.user}` — donne son ID Discord "
+            "ou son nom exact (voir `data/user.json`)."
+        )
+
+    label = _user_label(user_id, namespace.user)
+    current = rights.level(user_id)
+
+    # Lecture seule : /auth <user>
+    if namespace.level is None:
+        note = ", **immuable**" if rights.is_owner(user_id) else ""
+        return f"{label} : niveau **{current}**{_level_name(current)}{note}."
+
+    # Écriture : /auth <user> <level>
+    if rights.is_owner(user_id):
+        raise CommandError(
+            f"**Impossible de modifier {label}** : le propriétaire a toujours le "
+            f"niveau maximum **{OWNER_LEVEL}** (propriétaire)."
+        )
+    if not rights.set(user_id, namespace.level):
+        raise CommandError(
+            f"**Impossible de modifier {label}** : le propriétaire ne peut pas "
+            "être modifié."
+        )
+    ctx.bot.logger.log(
+        "auth",
+        user_id=user_id,
+        previous=current,
+        level=namespace.level,
+        source=ctx.source,
+        by=ctx.user_id,
+    )
+    return (
+        f"{label} : niveau {current} → **{namespace.level}**"
+        f"{_level_name(namespace.level)}."
+    )
+
+
 def _is_value(text: str) -> bool:
     return text.isdigit() and MIN_RELATIONSHIP <= int(text) <= MAX_RELATIONSHIP
 
@@ -303,9 +459,88 @@ def _parse_value(text: str) -> int:
     return value
 
 
+def known_user_ids(bot) -> list[int]:
+    """Tous les utilisateurs connus du bot, sans doublon.
+
+    Union des trois sources de connaissance : les noms de `data/user.json`,
+    les utilisateurs qui ont au moins une note ou une relation (SQLite), et
+    la whitelist.
+    """
+    ids: set[int] = set(known_user_names().values())
+
+    notes_ids = getattr(getattr(bot, "user_notes", None), "ids", None)
+    if callable(notes_ids):
+        found = notes_ids()
+        if isinstance(found, (list, tuple)):  # un mock n'est pas une liste
+            ids.update(found)
+
+    whitelist_ids = getattr(getattr(bot, "whitelist", None), "ids", None)
+    if isinstance(whitelist_ids, (list, tuple)):
+        ids.update(whitelist_ids)
+
+    return sorted(user_id for user_id in ids if isinstance(user_id, int))
+
+
+def _handle_set_relation_all(
+    namespace: argparse.Namespace, ctx: CommandContext, relation_label
+) -> str:
+    """`/set_relation -a [niveau]` : lit ou fixe la relation de tous les connus."""
+    users = known_user_ids(ctx.bot)
+    if not users:
+        raise CommandError(
+            "**Aucun utilisateur connu** : ajoute des noms dans `data/user.json`, "
+            "des IDs à la whitelist ou des notes via `/remember`."
+        )
+
+    # Écriture : /set_relation -a <0-100>
+    if namespace.value is not None or namespace.user is not None:
+        denied = check_access("/set_relation", SET_RELATION_MASS_LEVEL, ctx)
+        if denied:
+            raise CommandError(denied)
+        if namespace.user is not None:
+            raise _usage(
+                USAGE_SET_RELATION_ALL,
+                "**Erreur** : avec `-a`, la cible est **tous** les utilisateurs — "
+                "donne seulement le niveau (ou retire `-a` pour une seule personne).",
+            )
+        if not _is_value(namespace.value):
+            raise _usage(
+                USAGE_SET_RELATION_ALL,
+                f"**Erreur** : `{namespace.value}` n'est pas un niveau valide "
+                f"({MIN_RELATIONSHIP}-{MAX_RELATIONSHIP}).",
+            )
+        target = int(namespace.value)
+        for user_id in users:
+            ctx.bot.user_notes.set_relationship(user_id, target)
+        ctx.bot.logger.log(
+            "set_relation_all",
+            users=len(users),
+            relationship=target,
+            source=ctx.source,
+            by=ctx.user_id,
+        )
+        return (
+            f"Relation avec **{len(users)} utilisateur(s)** : **{target}/"
+            f"{MAX_RELATIONSHIP}** — {relation_label(target)}."
+        )
+
+    # Lecture : /set_relation -a
+    lines = []
+    for user_id in users:
+        value = ctx.bot.user_notes.relationship(user_id)
+        lines.append(
+            f"- {_user_label(user_id)} : **{value}/{MAX_RELATIONSHIP}** — "
+            f"{relation_label(value)}"
+        )
+    return f"**Relations ({len(users)})** :\n" + "\n".join(lines)
+
+
 def _handle_set_relation(namespace: argparse.Namespace, ctx: CommandContext) -> str:
     """Fixe le niveau de relation 0-100 avec un utilisateur (ou l'affiche)."""
     from agent.prompts import relation_label
+
+    if namespace.all:
+        return _handle_set_relation_all(namespace, ctx, relation_label)
 
     given = [value for value in (namespace.value, namespace.user) if value]
     if not given:
@@ -413,7 +648,15 @@ def build_commands() -> dict[str, Command]:
     set_auth_parser = _parser("/set_auth", "Niveau d'autorisation automatique des outils.", USAGE_SET_AUTH)
     set_auth_parser.add_argument("level", type=int, choices=(0, 1, 2), help="0 = jamais, 1 = sans confirmation, 2 = toujours demander")
 
-    set_relation_parser = _parser("/set_relation", "Niveau de relation 0-100 dans la mémoire.", USAGE_SET_RELATION)
+    set_relation_parser = _parser(
+        "/set_relation",
+        "Niveau de relation 0-100 dans la mémoire (un utilisateur ou, avec -a, tous).",
+        USAGE_SET_RELATION_FULL,
+    )
+    set_relation_parser.add_argument(
+        "-a", "--all", action="store_true",
+        help="tous les utilisateurs connus (user.json + notes + whitelist)",
+    )
     set_relation_parser.add_argument("value", nargs="?", help="nouveau niveau (0-100)")
     set_relation_parser.add_argument("user", nargs="?", help="user_id ou nom (data/user.json)")
 
@@ -427,18 +670,36 @@ def build_commands() -> dict[str, Command]:
 
     quit_parser = _parser("/quit", "Arrêt propre du bot.", "/quit")
 
+    auth_parser = _parser("/auth", "Niveau de droit d'un utilisateur (0-5).", USAGE_AUTH)
+    auth_parser.add_argument(
+        "user", nargs="?", help="user_id, mention ou nom (data/user.json) ; omis = liste"
+    )
+    auth_parser.add_argument(
+        "level", nargs="?", type=int, choices=range(MAX_LEVEL + 1),
+        help="nouveau niveau ; omis = afficher le niveau courant",
+    )
+
     commands = [
-        Command("/help", "liste des commandes", help_parser, _handle_help, owner_only=False),
-        Command("/whitelist", "IDs autorisés à parler au bot", whitelist_parser, _handle_whitelist),
-        Command("/set_auth", "niveau d'autorisation des outils (0|1|2)", set_auth_parser, _handle_set_auth),
-        Command("/set_relation", "niveau de relation 0-100 avec un utilisateur", set_relation_parser, _handle_set_relation),
+        # Niveaux minimums (échelle 0-5, voir core/rights.py) :
+        # 0 = whitelisté, 1 = confiance, 2 = admin, 5 = propriétaire.
+        Command("/help", "liste des commandes", help_parser, _handle_help, min_level=0),
+        Command("/whitelist", "IDs autorisés à parler au bot", whitelist_parser, _handle_whitelist,
+                min_level=2),
+        Command("/set_auth", "niveau d'autorisation des outils (0|1|2)", set_auth_parser, _handle_set_auth,
+                min_level=2),
+        Command("/set_relation", "niveau de relation 0-100 avec un utilisateur", set_relation_parser, _handle_set_relation,
+                min_level=1),
         Command(REMEMBER_PREFIX, "retiens une information sur moi", remember_parser, _handle_remember,
-                owner_only=False, free_text=True),
+                min_level=1, free_text=True),
         Command(FORGET_CMD, "oublie tout ce que tu sais de moi", forget_parser, _handle_forget,
-                owner_only=False),
-        Command("/token", "statistiques de tokens", token_parser, _handle_token),
+                min_level=0),
+        Command("/token", "statistiques de tokens", token_parser, _handle_token,
+                min_level=1),
+        Command("/auth", "niveau de droit d'un utilisateur", auth_parser, _handle_auth,
+                min_level=OWNER_LEVEL),
         # « quit » sans slash ne doit jamais éteindre le bot depuis Discord
-        Command("/quit", "arrêt propre du bot", quit_parser, _handle_quit, require_slash=True),
+        Command("/quit", "arrêt propre du bot", quit_parser, _handle_quit,
+                min_level=OWNER_LEVEL, require_slash=True),
     ]
     return {command.name: command for command in commands}
 
@@ -486,7 +747,10 @@ def _split_arguments(command: Command, line: str) -> list[str]:
 async def execute_command(
     command: Command, line: str, ctx: CommandContext
 ) -> str:
-    """Parse avec argparse puis exécute : renvoie du Markdown dans tous les cas."""
+    """Vérifie les droits, parse avec argparse puis exécute (Markdown partout)."""
+    denied = check_level(command, ctx)
+    if denied:
+        return denied
     try:
         argv = _split_arguments(command, line)
         namespace = command.parser.parse_args(argv)
@@ -510,5 +774,5 @@ async def run_command(
     command = match_command(line, commands, allow_bare=True)
     if command is None:
         first = line.strip().split(maxsplit=1)[0] if line.strip() else line
-        return f"**Commande inconnue** : `{first}` — tape `help` pour la liste."
+        return f"**{UNKNOWN_COMMAND}** : `{first}` — tape `help` pour la liste."
     return await execute_command(command, line, ctx)

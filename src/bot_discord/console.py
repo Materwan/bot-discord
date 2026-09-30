@@ -47,6 +47,7 @@ from .commands import (
     run_command,
 )
 from .config import BOT_OWNER_ID, DATA_DIR, MODEL
+from core import MAX_LEVEL
 
 MAX_OUTPUT_LINES = 400  # mémoire du panneau des sorties
 REFRESH_INTERVAL = 0.1  # secondes entre deux rafraîchissements du tableau
@@ -92,8 +93,8 @@ class CommandCompleter(Completer):
         self.bot = bot
         self.commands = commands
 
-    def _options(self, command: Command, slot: int) -> list[str]:
-        """Mots-clés attendus à la position `slot` de `command`."""
+    def _options(self, command: Command, slot: int, words: list[str]) -> list[str]:
+        """Mots-clés attendus à la position `slot` de `command` (`words` = ligne entière)."""
         name = command.name
         if name == "/whitelist":
             if slot == 0:
@@ -105,9 +106,20 @@ class CommandCompleter(Completer):
                 return ["0", "1", "2"]
         elif name == "/set_relation":
             if slot == 0:
-                return ["0", "50", "100"]
+                return ["-a", "0", "50", "100"]
             if slot == 1:
+                if len(words) > 1 and words[1] == "-a":
+                    return ["0", "50", "100"]  # /set_relation -a <niveau>
                 return list(known_user_names()) + [str(uid) for uid in self.bot.user_notes.ids()]
+        elif name == "/auth":
+            if slot == 0:
+                return (
+                    [str(BOT_OWNER_ID)]
+                    + list(known_user_names())
+                    + [str(uid) for uid in self.bot.rights.ids]
+                )
+            if slot == 1:
+                return [str(level) for level in range(MAX_LEVEL + 1)]
         elif name == "/help":
             if slot == 0:
                 return sorted(self.commands)
@@ -141,7 +153,7 @@ class CommandCompleter(Completer):
             slot, prefix = len(words) - 2, words[-1]
         slot = max(0, slot)
 
-        for option in self._options(command, slot):
+        for option in self._options(command, slot, words):
             if option.startswith(prefix):
                 yield Completion(option, start_position=-len(prefix))
 

@@ -3,7 +3,15 @@
 import re
 from pathlib import Path
 
-from bot_discord.config import PROMPT_FILE, USERS_FILE, USER_NAME_ID, DEFAULT_PROMPT, MAX_OTHERS, MIN_NAME_LENGTH
+from bot_discord.config import (
+    PROMPT_FILE,
+    USERS_FILE,
+    USER_NAME_ID,
+    DEFAULT_PROMPT,
+    MAX_OTHERS,
+    MIN_NAME_LENGTH,
+    BOT_OWNER_ID,
+)
 from core import rank
 
 
@@ -135,7 +143,9 @@ def format_history(history: list[dict] | None) -> str:
     if not history:
         return ""
     lines = [
-        "Historique récent de ce salon (les échanges plus anciens sont oubliés) :"
+        "Historique récent de ce salon (tes réponses PASSÉES : de simples exemples "
+        "de contenu, surtout PAS un style à reproduire — ne reprends ni le même ton "
+        "ni la même formule d'ouverture) :"
     ]
     for entry in history:
         lines.append(f"- {entry.get('author', '?')} : {entry.get('prompt', '')}")
@@ -143,6 +153,55 @@ def format_history(history: list[dict] | None) -> str:
         if reply:
             lines.append(f"  Toi : {reply}")
     return "\n".join(lines)
+
+
+def tone_directive(relationship: int, display_name: str, is_owner: bool = False) -> str:
+    """Ordre de ton pour **ce** message, à placer juste avant le message.
+
+    L'historique (20 réponses passées) est injecté juste avant et pousse le
+    modèle à imiter son propre registre : en tout dernier, cet ordre gagne au
+    rang récence et re-bascule sur le vrai niveau de relation.
+    """
+    if is_owner:
+        band = (
+            f"relation {relationship}/100 — règle absolue : ne clash, ne pique et "
+            "ne critique jamais cette personne, quel que soit le contexte."
+        )
+    elif relationship >= 81:
+        band = (
+            f"relation {relationship}/100 (excellente) — ton chaleureux, naturel et "
+            f"complice ; INTERDIT : clash, pique, critique ou moquerie envers {display_name}."
+        )
+    elif relationship >= 61:
+        band = (
+            f"relation {relationship}/100 (bonne) — taquineries bon enfant et humour "
+            "direct ; pas de pique insultante ni de critique humiliante."
+        )
+    elif relationship >= 41:
+        band = (
+            f"relation {relationship}/100 (moyenne) — ton amical, sarcasme léger et "
+            "plaisanteries personnalisées."
+        )
+    elif relationship >= 21:
+        band = (
+            f"relation {relationship}/100 (mauvaise) — taquinerie fréquente, clash "
+            "possible, références personnalisées."
+        )
+    elif relationship > 0:
+        band = (
+            f"relation {relationship}/100 (très mauvaise) — humour fort et clash possibles."
+        )
+    else:
+        # 0 = aucune donnée : un inconnu ne se fait pas clasher par défaut.
+        band = (
+            "relation inexistante ou très récente — ton neutre et poli, pas de "
+            f"clash ni de pique envers {display_name}."
+        )
+    return (
+        f"TON OBLIGATOIRE POUR CE MESSAGE : {band} "
+        "N'imite pas le registre de l'historique ni une formule d'ouverture déjà "
+        f"utilisée : varie le ton et suis ce niveau de relation."
+    )
 
 
 def build_system_prompt(
@@ -188,6 +247,18 @@ def build_system_prompt(
     history_context = format_history(history)
     if history_context:
         parts.append(history_context)
+
+    # Ordre de ton EN DERNIER : juste avant « MESSAGE : », il prime sur
+    # l'historique, qui pousse le modèle à répéter son propre style de clash.
+    author_id = getattr(author, "id", None)
+    relationship = user_notes.relationship(author_id) if author_id is not None else 0
+    parts.append(
+        tone_directive(
+            relationship,
+            getattr(author, "display_name", "l'auteur"),
+            is_owner=author_id == BOT_OWNER_ID,
+        )
+    )
 
     return "\n\n".join(p for p in parts if p)
 
