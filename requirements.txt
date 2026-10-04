@@ -1,0 +1,3 @@
+# The bot's code is in clara-server (clara.discord_bot): install it, with its Discord extra, from the folder next to
+# this one. On a machine without the clara-server folder: pip install "clara-server[discord] @ git+<its repository URL>"
+-e ../clara-server[discord]

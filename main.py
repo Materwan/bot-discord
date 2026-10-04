@@ -1,10 +1,20 @@
-"""`python main.py` starts the bot (same as `clara-discord`)."""
+"""`python main.py` starts Clara's Discord bot on its own, talking to a Clara server over HTTP.
 
-import sys
+The code is clara-server's (clara.discord_bot); this folder only holds the configuration (.env) and the log (data/).
+"""
+
+import os
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent / "src"))
+from dotenv import load_dotenv
 
-from clara_discord.app import run  # noqa: E402
+HERE = Path(__file__).parent
+load_dotenv(HERE / ".env")
+os.environ.setdefault("CLARA_DISCORD_DATA_DIR", str(HERE / "data"))
+
+try:
+    from clara.discord_bot.standalone import run
+except ImportError:
+    raise SystemExit("clara-server is not installed here: pip install -r requirements.txt") from None
 
 run()
