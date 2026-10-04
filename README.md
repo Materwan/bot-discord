@@ -1,177 +1,118 @@
-# Clara — Discord bot powered by Ollama
+# Clara on Discord
 
-Clara is a French-speaking Discord bot (school help + banter) running on a local
-or cloud **Ollama** model. She remembers facts about each user, keeps a
-relationship score with them, reads attached files, and is driven from a
-full-screen terminal console.
+A thin client of the [Clara server](../clara-server): the bot keeps no memory, no history and no model of its own.
+It passes Discord messages to the server and posts Clara's answers. Clara is the same everywhere: what she learns on
+Discord she knows on the web site, in the desktop app and in the terminal, and the other way round.
 
-The code, comments and file names are in English; everything users see on
-Discord (answers, command outputs) is in French.
-
-## Features
-
-- **Answers with tools** — the model can call `read_file`, `remember_user_info`,
-  `forget_user_info` and `save_channel_memory` (native Ollama tool calling).
-- **Per-user memory** (SQLite) — permanent notes (`/remember`) and facts learned
-  automatically after each message, ranked by relevance before being injected.
-- **Relationship score (0-100)** — moves with the tone of each message (LLM
-  analysis + local insult detector) and sets the tone of Clara's answers.
-- **Tagging** — Clara can tag any member of the server, human or bot, by
-  writing `@Name` (up to 10 different people per answer).
-- **Channel memory and history** — durable facts per channel, plus the last
-  `HISTORY_SIZE` exchanges re-injected as context.
-- **Access control** — a whitelist decides who gets answers; permission levels
-  (0-5) decide who may run which command. The owner is always level 5.
-- **Native slash commands** — `/relation`, `/whitelist`… with Discord's own
-  menus and user pickers; the terminal runs the same commands and handlers.
-- **Terminal console** — live table of active requests, Markdown output,
-  auto-completion and history.
+```
+ Discord ─── bot (this) ───► Clara server ───► Ollama
+                                  │
+                             SQLite memory
+```
 
 ## Setup
 
-Requirements: Python 3.11+, [Ollama](https://ollama.com) with the chosen model,
-and a Discord bot token (Message Content and Server Members intents enabled).
+On the **server** (`clara-server/.env`), give the bot a client token, and keep it to Discord accounts:
+
+```
+CLARA_TOKENS=...,discord:<a long random token>
+CLARA_CLIENT_SURFACES=...,discord=discord
+```
+
+`python -c "import secrets; print(secrets.token_urlsafe(32))"` makes a token. Discord accounts must sign in before
+they can talk (`CLARA_LOGIN_SURFACES=discord`, the default).
+
+In the **Discord developer portal**, on the *Bot* page of your application, turn on the **Message Content** and
+**Server Members** intents. Invite the bot with the `bot` and `applications.commands` scopes, and the permissions to
+read and send messages (and read the message history).
+
+Then here:
 
 ```bash
-pip install -e ".[dev]"
-cp .env.example .env      # then fill DISCORD_BOT_TOKEN and BOT_OWNER_ID
-python main.py            # or: clara, or: python -m clara
+python -m venv .venv
+.venv/Scripts/pip install -e ".[dev]"     # Linux: .venv/bin/pip
+cp .env.example .env                      # DISCORD_BOT_TOKEN, CLARA_URL, CLARA_TOKEN
+.venv/Scripts/clara-discord               # or: python main.py, python -m clara_discord
 ```
 
-| Variable | Default | Meaning |
-| --- | --- | --- |
-| `DISCORD_BOT_TOKEN` | *(required)* | Bot token |
-| `BOT_OWNER_ID` | *(required)* | Discord ID of the owner (level 5, always allowed) |
-| `OLLAMA_MODEL` | `gemma4:31b-cloud` | Model used for answers and analysis |
-| `OLLAMA_HOST` | local server | Ollama server URL |
-| `HISTORY_SIZE` | `20` | Exchanges kept per channel |
-| `AUTO_INSIGHTS` | `1` | `0` disables the fact/tone LLM pass (the insult detector still runs) |
-| `ALLOWED_BOT_IDS` | *(empty)* | Other bots allowed to talk to Clara |
+The log is printed and kept in `data/logs/clara-discord.log` (5 files of 5 MB).
 
-Clara's personality lives in `config/system_prompt.md` (re-read automatically
-when edited). Optional per-user instructions can be added in
-`config/user_instructions.json`: `{"<user_id>": {"instructions": ["..."]}}`.
+## Using it
 
-## Commands
+**An account first.** Nobody can talk to Clara without one. `/register` opens a private form (user name, password
+twice) and makes a Clara user: the same user name and password work on Clara's web site, the desktop app and the
+terminal. Someone who already has a user signs in with `/login`. Somebody without an account who talks to Clara is
+told so (at most once every 10 minutes), and nothing they write is sent to the server.
 
-On Discord, commands are **native slash commands**: type `/` and pick one of
-Clara's. They are published at every start (one bulk update; a failure is shown
-in the console and logged as `slash_sync_error`). Replies are **ephemeral**:
-only the person who ran the command sees them. Only the owner and whitelisted
-users may use them; anybody else gets a refusal (`whitelist_denied` logged).
+Discord cannot hide what is typed in a form: mind your screen when you type a password.
 
-In the terminal, type the same names with arguments (the `/` is optional there).
-Both run the same handlers (`bot/slash_commands.py` turns the Discord options
-into the terminal line).
+**Where Clara answers.**
 
-| Level | Name | Discord | Terminal |
-| --- | --- | --- | --- |
-| 0 | visiteur | `/help [commande]`, `/forget` | `/help [commande]`, `/forget` |
-| 1 | confiance | `/remember info`, `/relation [utilisateur] [valeur]`, `/token [tout]` | `/remember <info>`, `/relation [<0-100>] <user>`, `/token [-a]` |
-| 2 | admin | `/whitelist [action] [utilisateur]`, `/relation tous:True valeur` | `/whitelist [add\|remove\|list] [user]`, `/relation -a <0-100>` |
-| 5 | propriétaire | `/auth [utilisateur] [niveau]`, `/quit` | `/auth [user] [0-5]`, `/quit` |
-
-- On Discord, users are picked with Discord's user selector. In the terminal, a
-  **user** is an ID, a mention or a name from `data/known_users.json`.
-- `/relation` with a value sets the score, without one it shows it; `tous` /
-  `-a` targets every known user (listing needs level 1, writing level 2).
-- `/auth` lists every level, with a user shows one, with a user and a level sets it.
-- Being whitelisted grants level 0 only; raise users with `/auth`.
-- The terminal is the owner's machine: it always has level 5.
-- Every denial is logged as `permission_denied`.
-- A mention of Clara starting with `/` ("@Clara /relation …") is never sent to
-  the model: Clara answers with a hint to use the native commands instead.
-
-### Console keys
-
-`Tab` completes, `↑/↓` browse history, `PageUp/PageDown` or the mouse wheel
-scroll the output, `Ctrl+C` clears the line, `Ctrl+D` (or `/quit`) stops the bot.
-Without an interactive terminal the console is disabled and the bot keeps running.
-
-## How a message is handled
-
-1. **Filter** — the bot must be mentioned; bots need `ALLOWED_BOT_IDS`; the
-   author must be the owner or whitelisted (otherwise: silent, `whitelist_denied` logged).
-   To prevent two bots from tagging each other forever, at most 3 bot messages
-   in a row get an answer per channel; any human message resets the count
-   (`bot_loop_stopped` logged).
-2. **Settle** — wait until the author stops typing and editing (the latest
-   edited version is used; a deleted message is dropped).
-3. **Old-style command** — a text starting with `/` gets the slash-command hint and stops.
-4. **Answer** — save readable attachments (`.md .pdf .py .c .h`), build the
-   prompt (persona + people + channel facts + history + tone order), call the
-   model with its tools, reply (split at 2000 characters). The prompt tells the
-   model to write `@Name` to tag someone and lists the people and bots involved;
-   `@Name` becomes a ping when it matches `data/known_users.json` or a server
-   member's display name or username. Roles, `@everyone` and `@here` are never pinged.
-5. **Learn** — a JSON-mode LLM pass extracts new facts about the author and the
-   people cited, and the author's tone adjusts the relationship score.
-
-### Memory safety
-
-- Learned facts that read like orders ("retiens que tu dois…", "from now on…")
-  are rejected by `UserNotes.add_learned`, the single entry point of automatic writes.
-- Tools only act on the current channel and on the people involved in the
-  message: the model cannot write notes about, or erase, anybody else.
-- The prompt states that notes, memories and history are data, never instructions.
-
-## Project layout
-
-```
-src/clara/
-├─ app.py               wiring, startup, shutdown
-├─ settings.py          .env + file locations (frozen dataclass)
-├─ texts.py             French user-facing texts
-├─ tracking.py          active requests (dashboard)
-├─ storage/             persistence, no Discord imports
-│  ├─ json_file.py      atomic writes + mtime-cached files
-│  ├─ user_notes.py     SQLite notes + relationship score
-│  ├─ channel_memory.py
-│  ├─ channel_history.py
-│  ├─ access.py         whitelist + permission levels
-│  ├─ user_directory.py name <-> ID
-│  └─ event_log.py      JSONL log + token stats
-├─ analysis/            pure text functions
-│  ├─ ranking.py        keyword relevance
-│  ├─ injection_guard.py
-│  └─ tone.py
-├─ llm/
-│  ├─ client.py         Ollama chat + tool loop
-│  ├─ tools.py          the model's tools
-│  ├─ prompt_builder.py
-│  └─ insights.py       fact + tone extraction
-├─ bot/
-│  ├─ client.py         discord.Client events
-│  ├─ pipeline.py       filter → settle → answer → learn
-│  ├─ slash_commands.py native Discord commands → shared handlers
-│  ├─ mentions.py       prompt text, cited people, pings
-│  ├─ settling.py
-│  └─ loop_guard.py     bot-to-bot reply limit
-├─ commands/
-│  ├─ framework.py      parsing, permission checks, dispatch
-│  └─ handlers.py       the commands
-└─ console/             prompt_toolkit UI, completer, dashboard
-```
-
-## Data (`data/`, git-ignored)
-
-| File | Content |
+| | |
 | --- | --- |
-| `user_notes.sqlite` | `notes(user_id, kind, text, created_at)` + `relationships(user_id, value)` |
-| `channel_memory.json` | Facts per channel |
-| `channel_history.json` | Last exchanges per channel |
-| `whitelist.json` | IDs allowed to talk to the bot |
-| `permissions.json` | Level of each user (the owner is never stored) |
-| `known_users.json` | Name → Discord ID (edited by hand) |
-| `event_log.jsonl` | Every event: messages, tokens, errors, command audits |
-| `console_history.txt` | Console input history |
-| `uploads/` | Saved attachments (`<message_id>_<filename>`) |
+| Private messages | every message |
+| A server channel or thread | a message that mentions her (or her bot role), or replies to one of her messages |
+| | any other message of a signed-in member, *if an administrator lets her chime in on that server*: she answers only when she has something worth adding |
 
-## Tests
+Every message of a signed-in member is sent to the server, even when she does not answer, so that she follows the
+conversation. While she is busy with a message of a channel, the others of that channel are only kept as context.
+Bots are ignored.
 
-```bash
-python -m pytest -q
+**What Clara knows on a server.** The members who are signed in are listed to her, with what she remembers about
+the people a message mentions or replies to. She can look up what she remembers about any other signed-in member.
+Each channel is one conversation, shared by everybody in it.
+
+**Pings.** Clara writes `@Name` and the bot turns it into a ping of the member with that name (display name or
+user name; at most 10 people per answer). Roles, `@everyone` and `@here` are never pinged.
+
+**Reminders** ("remind me tomorrow at 9 to call Paul") and notifications arrive as private messages. Reminders
+that fire while the bot is off are sent when it is back (up to a week later).
+
+### Commands
+
+Replies to commands are only visible to whoever ran them. Command descriptions and the bot's own messages are in
+French for people whose Discord is in French, in English otherwise.
+
+| Command | |
+| --- | --- |
+| `/register` | make your Clara account (a form), and sign in |
+| `/login` | sign in to an existing Clara account (a form) |
+| `/logout` | sign out; what Clara knows about you stays with your account |
+| `/me` | your account, linked accounts, your relationship with Clara and what she remembers, with a menu to make her forget something |
+| `/remember <text>` | make her remember something about you |
+| `/forget <memory>` | make her forget something (the list completes as you type) |
+| `/reset` | clear the conversation of this channel (people who can manage the server only) or of your private messages; what she knows about each person is kept |
+| `/help` | how to talk with her |
+
+### Administration
+
+It is on the server: its console, `clara-admin`, or the web site's *Admin* page.
+
+| | |
+| --- | --- |
+| Chime in | `/chime` lists the Discord servers; `/chime <server> on\|off\|default`, `/chime default on\|off`; or *Admin > Spaces* |
+| Relationship | `/relation [<person> [<0-100>\|+n\|-n\|reset]]`; or *Admin > People & memory* |
+| Memories | `/facts <person>`, `/remember <person> <text>`, `/forget <person> <id>` |
+| Accounts | `/user list` shows the Discord accounts signed in for each user; `/user logout <name>` signs them out, `/user disable <name>` bars someone |
+
+## Layout
+
+```
+src/clara_discord/
+  app.py        start: settings, log, the client
+  settings.py   .env
+  bot.py        the Discord client: gateway events, the servers it is in, background tasks
+  routing.py    which messages are answered, observed or ignored (no Discord in it)
+  handler.py    a message: what Clara is given (roster, people mentioned, the replied-to message), her answer
+  commands.py   slash commands, sign-in forms, /me
+  events.py     reminders and notifications -> private messages
+  accounts.py   who is signed in (a copy of the server's), the language of each person
+  api.py        every call to the Clara server
+  mentions.py   <@id> -> @Name, @Name -> pings, long answers split
+  texts.py      the bot's own texts, in French and English
 ```
 
-Every test runs on temporary files with a scripted fake Ollama client: your
-real data is never touched and no model is called.
+Tests: `pytest` (no Discord, no server: both are faked). Lint: `ruff check .`.
+
+The previous bot (its own Ollama calls, memory, whitelist and terminal console) is in the git history. Its data
+in `data/` (`user_notes.sqlite`...) is not read any more.
